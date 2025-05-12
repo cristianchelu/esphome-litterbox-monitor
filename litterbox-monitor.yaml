@@ -1,0 +1,445 @@
+substitutions:
+  vibration_off_delay: "4" # seconds
+  activity_off_delay: "4" # seconds
+  vibration_threshold: "0.020" # kg
+  spike_threshold: "4" # kg
+  litter_change_interval: "30" # days
+  min_clean_event_duration: "30" # seconds
+
+globals:
+  - id: litterbox_weight
+    type: float
+    initial_value: "0.0" # TODO: Set to the weight of the empty litterbox
+    restore_value: False
+  - id: cat1_weight
+    type: float
+    initial_value: "0.0" # TODO: Set to the weight of the first cat
+    restore_value: True
+  - id: cat2_weight
+    type: float
+    initial_value: "0.0" # TODO: Set to the weight of the second cat
+    restore_value: True
+  # -------
+  - id: tare_value
+    type: float
+    initial_value: "0.0"
+    restore_value: True
+  - id: auto_tare_value
+    type: float
+    initial_value: "0.0"
+    restore_value: True
+  - id: event_start
+    type: time_t
+    initial_value: "0"
+    restore_value: False
+  - id: stable_start
+    type: time_t
+    initial_value: "0"
+    restore_value: False
+  - id: stable_duration
+    type: uint8_t
+    initial_value: "0"
+    restore_value: False
+  - id: is_cat_event
+    type: bool
+    initial_value: "false"
+    restore_value: False
+  - id: litter_changed_date
+    type: time_t
+    initial_value: "0"
+    restore_value: True
+  - id: cat_weight_sum
+    type: float
+    initial_value: "0.0"
+    restore_value: False
+  - id: cat_weight_count
+    type: int
+    initial_value: "0"
+    restore_value: False
+
+esphome:
+  name: litterbox
+  friendly_name: Litterbox
+  comment: Smart Litterbox
+  project:
+    name: "CristianChelu.LitterboxMonitor"
+    version: "esp32.hx711"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: ERROR
+
+api:
+  encryption:
+    key: !secret litterbox_api_key
+  services:
+    - service: set_cat_weight
+      variables:
+        cat: int
+        weight: float
+      then:
+        - lambda: |-
+            switch(cat) {
+              case 1: 
+                id(cat1_weight) = weight;
+                id(cat1_weight_sensor).publish_state(weight);
+                return;
+              case 2: 
+                id(cat2_weight) = weight;
+                id(cat2_weight_sensor).publish_state(weight);
+                return;
+            }
+
+ota:
+  - platform: esphome
+    password: !secret litterbox_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Litterbox Fallback Hotspot"
+    password: !secret litterbox_ap_password
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    timezone: GMT0
+    id: homeassistant_time
+
+sensor:
+  - platform: template
+    name: "Cat 1 Weight"
+    id: cat1_weight_sensor
+    icon: "mdi:scale-bathroom"
+    device_class: weight
+    state_class: measurement
+    accuracy_decimals: 2
+    unit_of_measurement: kg
+    lambda: return id(cat1_weight);
+  - platform: template
+    name: "Cat 2 Weight"
+    id: cat2_weight_sensor
+    icon: "mdi:scale-bathroom"
+    device_class: weight
+    state_class: measurement
+    accuracy_decimals: 2
+    unit_of_measurement: kg
+    lambda: return id(cat2_weight);
+  # ----
+  - platform: hx711
+    id: hx711_analog_value
+    name: "Analog sensor value"
+    dout_pin: GPIO16
+    clk_pin: GPIO4
+    gain: 128
+    update_interval: 100ms
+    entity_category: diagnostic
+    disabled_by_default: True
+  - platform: copy
+    id: hx711_value
+    source_id: hx711_analog_value
+    unit_of_measurement: "kg"
+    device_class: weight
+    state_class: measurement
+    accuracy_decimals: 3
+    internal: true
+    filters:
+      - calibrate_linear:
+          - 205901 -> 0.0
+          - 1794742 -> 12.441
+      - lambda: if (x > 40.0 || x < -20.0) { return {}; } else { return x; }
+      - lambda: |-
+          static float prev_value = 0.0;
+          if (abs(x - prev_value) < ${spike_threshold}) {
+            prev_value = x;
+            return x;
+          } else {
+            prev_value = x;
+            return {};
+          }
+
+  - platform: copy
+    id: hx711_unfiltered_value
+    name: "Unfiltered Weight"
+    icon: "mdi:scale-unbalanced"
+    entity_category: diagnostic
+    source_id: hx711_value
+    internal: False
+    disabled_by_default: True
+    filters:
+      # only publish raw 10hz sensor value during events
+      - lambda: |-
+          if (id(activity_detected).state) {
+            return x;
+          } else {
+            return {};
+          }
+
+  - platform: copy
+    id: hx711_raw_value
+    source_id: hx711_value
+    name: "Raw Weight"
+    icon: "mdi:scale-unbalanced"
+    entity_category: diagnostic
+    unit_of_measurement: "kg"
+    accuracy_decimals: 3
+    internal: False
+    disabled_by_default: True
+    filters:
+      - quantile:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
+          quantile: 0.9
+    on_value:
+      - sensor.template.publish:
+          id: weight_value
+          state: !lambda "return x - id(tare_value) - id(auto_tare_value);"
+      - lambda: |- # Auto Tare
+          if (abs(id(weight_value).state) < 0.005 && id(activity_detected).state == false) {
+            if (id(weight_value).state != 0.0) {
+              id(auto_tare_value) += id(weight_value).state;
+            }
+          }
+      - lambda: |- # Reading Stability
+          static float prev_value = 0.0;
+          if (abs(x - prev_value) < ${vibration_threshold}) {
+            id(vibration_detected).publish_state(false);
+          } else {
+            id(vibration_detected).publish_state(true);
+          }
+          prev_value = x;
+  - platform: template
+    id: weight_value
+    name: "Tared Weight"
+    icon: "mdi:scale"
+    entity_category: diagnostic
+    unit_of_measurement: "kg"
+    accuracy_decimals: 3
+    filters:
+      - lambda: |-
+          if (abs(x) < 0.001) {
+            return 0.0;
+          } else {
+            return x;
+          }
+    on_value:
+      - lambda: |- # Is a known cat
+          bool is_cat_1 = abs(id(weight_value).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
+          bool is_cat_2 = abs(id(weight_value).state - id(cat2_weight)) / id(cat2_weight) < 0.1;
+          if (is_cat_1 || is_cat_2) {
+            id(cat_detected).publish_state(true);
+          } else {
+            id(cat_detected).publish_state(false);
+          }
+      - lambda: |- # Average stable cat weight
+          if (id(cat_detected).state == true && id(vibration_detected).state == false) {
+            id(cat_weight_count) = id(cat_weight_count) + 1;
+            id(cat_weight_sum) = id(cat_weight_sum) + id(weight_value).state;
+          }
+  - platform: template
+    unit_of_measurement: g
+    name: "Waste Weight"
+    id: waste_weight
+    accuracy_decimals: 0
+    icon: "mdi:emoticon-poop"
+  - platform: template
+    name: "Cat Weight"
+    id: current_cat_weight
+    entity_category: diagnostic
+    accuracy_decimals: 2
+    unit_of_measurement: kg
+    icon: "mdi:scale-bathroom"
+    disabled_by_default: True
+  - platform: template
+    unit_of_measurement: kg
+    id: litter_weight
+    name: "Litter Remaining"
+    icon: "mdi:tray-full"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Visits"
+    id: visits
+    accuracy_decimals: 0
+    update_interval: never
+    state_class: measurement
+  - platform: template
+    name: "Litterbox Weight"
+    icon: "mdi:tray"
+    device_class: weight
+    unit_of_measurement: kg
+    entity_category: diagnostic
+    lambda: return id(litterbox_weight);
+    disabled_by_default: True
+  - platform: template
+    id: litter_life_left
+    name: "Deep Clean Timer"
+    icon: mdi:broom
+    device_class: duration
+    state_class: measurement
+    unit_of_measurement: "d"
+    accuracy_decimals: 0
+    lambda: |-
+      auto last_changed = id(litter_changed_date);
+      if (last_changed == 0) {
+        return 0;
+      }
+
+      const double seconds_per_day = 60 * 60 * 24;
+      double now = id(homeassistant_time).now().timestamp;
+      double dur = last_changed + (${litter_change_interval} * seconds_per_day) - now;
+      return std::max(std::floor(dur / seconds_per_day), (double)0);
+
+binary_sensor:
+  - platform: analog_threshold
+    sensor_id: weight_value
+    name: "Occupancy"
+    device_class: occupancy
+    entity_category: diagnostic
+    id: occupancy_detected
+    disabled_by_default: True
+    threshold:
+      lower: 0.6
+      upper: 0.9
+  - platform: template
+    name: "Activity"
+    id: activity_detected
+    entity_category: diagnostic
+    device_class: motion
+    lambda: return id(cat_detected).state || id(vibration_detected).state || id(occupancy_detected).state;
+    filters:
+      - delayed_off:
+          seconds: ${activity_off_delay}
+    on_press:
+      - lambda: |-
+          id(event_start) = id(homeassistant_time).now().timestamp; 
+          ESP_LOGV("ACT", "Activity start! %lu", id(event_start));
+    on_release:
+      - lambda: |- # Set cat event data
+          // Update cat weight if stable enough
+          if (id(current_cat_weight).state > 0.0) {
+            bool is_cat_1 = abs(id(current_cat_weight).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
+            bool is_cat_2 = abs(id(current_cat_weight).state - id(cat2_weight)) / id(cat2_weight) < 0.1;
+            if (is_cat_1) {
+              id(cat1_weight) = id(current_cat_weight).state;
+              id(cat1_weight_sensor).publish_state(id(current_cat_weight).state);
+            } else if (is_cat_2) {
+              id(cat2_weight) = id(current_cat_weight).state;
+              id(cat2_weight_sensor).publish_state(id(current_cat_weight).state);
+            }
+
+            // Add to total waste in litterbox if the cat was stable enough to leave something
+            id(waste_weight).publish_state(id(waste_weight).state + max(id(weight_value).state * 1000, 0.0f));
+          }
+
+          if (id(is_cat_event)) {
+            // Add a visit even if the cat left nothing
+            id(visits).publish_state(id(visits).state + 1);
+          }
+      - lambda: |- # Set clean event data
+          if (id(is_cat_event)) {
+            return;
+          }
+          auto now = id(homeassistant_time).now().timestamp;
+          if (now - id(event_start) < ${min_clean_event_duration}) {
+            // ignore bumps
+            // TODO: Figure out from vibration pattern what makes a clean event
+            return;
+          }
+
+          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+          id(waste_weight).publish_state(0.0);
+          id(visits).publish_state(0);
+      - lambda: |- # Reset globals
+          id(cat_detected).publish_state(false);
+          id(current_cat_weight).publish_state(0);
+          id(tare_value) = id(hx711_raw_value).state;
+          id(auto_tare_value) = 0;
+          id(is_cat_event) = false;
+          id(event_start) = 0;
+          id(stable_start) = 0;
+          id(stable_duration) = 0;
+          id(cat_weight_count) = 0;
+          id(cat_weight_sum) = 0;
+  - platform: template
+    device_class: vibration
+    entity_category: diagnostic
+    name: "Vibration"
+    id: vibration_detected
+    disabled_by_default: True
+    filters:
+      - delayed_off:
+          seconds: ${vibration_off_delay}
+    on_press:
+      - lambda: |- # Longest stable duration
+          if (id(is_cat_event) == false) {
+            return;
+          }
+          time_t now = id(homeassistant_time).now().timestamp;
+          uint8_t dur = now - id(stable_start) + ${vibration_off_delay};
+          ESP_LOGV("VBR", "Vibration start! duration: %u, max dur: %u", dur, id(stable_duration));
+          if (dur > id(stable_duration)) {
+            id(stable_duration) = dur;
+            
+            // Cat weight is average of longest stable duration
+            if (id(cat_weight_count) > 0) {
+              id(current_cat_weight).publish_state(id(cat_weight_sum)/id(cat_weight_count));
+              ESP_LOGV("VBR", "Publishing cat state: %.2f", id(cat_weight_sum)/id(cat_weight_count));
+            }
+          }
+          id(cat_weight_sum) = 0;
+          id(cat_weight_count) = 0;
+    on_release:
+      - lambda: |-
+          ESP_LOGV("VBR", "Vibration end! eventStart: %lu", id(event_start));
+          if (id(event_start) == 0) {
+            return;
+          }
+          id(stable_start) = id(homeassistant_time).now().timestamp;
+
+  - platform: template
+    device_class: occupancy
+    entity_category: diagnostic
+    name: "Cat Event"
+    id: cat_detected
+    disabled_by_default: True
+    filters:
+      - delayed_on:
+          seconds: 2
+    on_press:
+      - lambda: id(is_cat_event) = true;
+
+button:
+  - platform: template
+    name: "Reset Deep Clean Timer"
+    icon: mdi:reload
+    on_press:
+      - lambda: |-
+          id(litter_changed_date) = id(homeassistant_time).now().timestamp;
+      - sensor.template.publish:
+          id: litter_life_left
+          state: ${litter_change_interval}
+  - platform: template
+    name: "Reset Clean"
+    icon: mdi:reload
+    on_press:
+      - lambda: |-
+          id(tare_value) = id(hx711_raw_value).state;
+          id(auto_tare_value) = 0;
+          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+          id(visits).publish_state(0);
+          id(waste_weight).publish_state(0);
+          id(cat_detected).publish_state(false);
+          id(current_cat_weight).publish_state(0);       
+          id(is_cat_event) = false;
+          id(event_start) = 0;
+          id(stable_start) = 0;
+          id(stable_duration) = 0;
+          id(cat_weight_count) = 0;
+          id(cat_weight_sum) = 0;
