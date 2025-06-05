@@ -398,17 +398,7 @@ binary_sensor:
           id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
           id(waste_weight).publish_state(0.0);
           id(visits).publish_state(0);
-      - lambda: |- # Reset globals
-          id(cat_detected).publish_state(false);
-          id(current_cat_weight).publish_state(0);
-          id(tare_value) = id(hx711_raw_value).state;
-          id(auto_tare_value) = 0;
-          id(is_cat_event) = false;
-          id(event_start) = 0;
-          id(stable_start) = 0;
-          id(stable_duration) = 0;
-          id(cat_weight_count) = 0;
-          id(cat_weight_sum) = 0;
+      - script.execute: reset_event
   - platform: template
     device_class: vibration
     entity_category: diagnostic
@@ -471,14 +461,21 @@ button:
     name: "Reset Clean"
     icon: mdi:reload
     on_press:
+      - script.execute: reset_event
       - lambda: |-
+          id(waste_weight).publish_state(0);
+          id(visits).publish_state(0);
+          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+
+script:
+  # Reset all event-related state
+  - id: reset_event
+    then:
+      - lambda: |-
+          id(cat_detected).publish_state(false);
+          id(current_cat_weight).publish_state(0);
           id(tare_value) = id(hx711_raw_value).state;
           id(auto_tare_value) = 0;
-          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
-          id(visits).publish_state(0);
-          id(waste_weight).publish_state(0);
-          id(cat_detected).publish_state(false);
-          id(current_cat_weight).publish_state(0);       
           id(is_cat_event) = false;
           id(event_start) = 0;
           id(stable_start) = 0;
