@@ -13,7 +13,7 @@ cat visits, waste, and litter status using load cells.
 - **Remaining litter tracking:** Calculates remaining litter after clean events.
 - **Deep clean / replace litter reminder:** Notifies when it's time to change litter.
 - **Clean event detection:** Detects and resets waste/litter counters after removing waste.
-- **Visit counting:** Tracks the number of cat visits between cleans.
+- **Visit counting:** Tracks the number of cat visits between cleans and daily for each cat.
 - **Automatic tare:** Maintains accurate zeroing of the scale.
 - **Home Assistant integration:** All sensors and actions are available in Home Assistant.
 

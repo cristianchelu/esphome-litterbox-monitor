@@ -7,6 +7,10 @@ substitutions:
   min_clean_event_duration: "30" # seconds
   cat1_name: "Cat 1"
   cat2_name: "Cat 2"
+  # Timezone of the device, used for daily visits sensors
+  # See https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+  # for valid values, e.g. "Europe/Bucharest", "America/New_York", "GMT0"
+  timezone: "GMT0"
 
 globals:
   - id: litterbox_weight
@@ -20,6 +24,14 @@ globals:
   - id: cat2_weight
     type: float
     initial_value: "0.0" # TODO: Set to the weight of the second cat
+    restore_value: True
+  - id: cat1_daily_visits
+    type: int
+    initial_value: "0"
+    restore_value: True
+  - id: cat2_daily_visits
+    type: int
+    initial_value: "0"
     restore_value: True
   # -------
   - id: tare_value
@@ -111,8 +123,18 @@ captive_portal:
 
 time:
   - platform: homeassistant
-    timezone: GMT0
+    timezone: ${timezone}
     id: homeassistant_time
+    on_time:
+      - hours: 0
+        minutes: 0
+        seconds: 0
+        then:
+          - lambda: |-
+              id(cat1_daily_visits) = 0;
+              id(cat1_daily_visits_sensor).publish_state(0);
+              id(cat2_daily_visits) = 0;
+              id(cat2_daily_visits_sensor).publish_state(0);
 
 sensor:
   - platform: template
@@ -133,6 +155,20 @@ sensor:
     accuracy_decimals: 2
     unit_of_measurement: kg
     lambda: return id(cat2_weight);
+  - platform: template
+    name: "${cat1_name} Daily Visits"
+    id: cat1_daily_visits_sensor
+    icon: "mdi:eye-arrow-left"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat1_daily_visits);
+  - platform: template
+    name: "${cat2_name} Daily Visits"
+    id: cat2_daily_visits_sensor
+    icon: "mdi:eye-arrow-left"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat2_daily_visits);
   # ----
   - platform: hx711
     id: hx711_analog_value
@@ -266,7 +302,7 @@ sensor:
     icon: "mdi:tray-full"
     accuracy_decimals: 2
   - platform: template
-    name: "Visits"
+    name: "Visits since clean"
     id: visits
     accuracy_decimals: 0
     update_interval: never
@@ -331,9 +367,13 @@ binary_sensor:
             if (is_cat_1) {
               id(cat1_weight) = id(current_cat_weight).state;
               id(cat1_weight_sensor).publish_state(id(current_cat_weight).state);
+              id(cat1_daily_visits) = id(cat1_daily_visits) + 1;
+              id(cat1_daily_visits_sensor).publish_state(id(cat1_daily_visits));
             } else if (is_cat_2) {
               id(cat2_weight) = id(current_cat_weight).state;
               id(cat2_weight_sensor).publish_state(id(current_cat_weight).state);
+              id(cat2_daily_visits) = id(cat2_daily_visits) + 1;
+              id(cat2_daily_visits_sensor).publish_state(id(cat2_daily_visits));
             }
 
             // Add to total waste in litterbox if the cat was stable enough to leave something
