@@ -96,7 +96,7 @@ api:
         cat: int
         weight: float
       then:
-        - lambda: |-
+        - lambda: !lambda |-
             switch(cat) {
               case 1: 
                 id(cat1_weight) = weight;
@@ -130,7 +130,7 @@ time:
         minutes: 0
         seconds: 0
         then:
-          - lambda: |-
+          - lambda: !lambda |-
               id(cat1_daily_visits) = 0;
               id(cat1_daily_visits_sensor).publish_state(0);
               id(cat2_daily_visits) = 0;
@@ -192,7 +192,7 @@ sensor:
           - 205901 -> 0.0
           - 1794742 -> 12.441
       - lambda: if (x > 40.0 || x < -20.0) { return {}; } else { return x; }
-      - lambda: |-
+      - lambda: !lambda |-
           static float prev_value = 0.0;
           if (abs(x - prev_value) < ${spike_threshold}) {
             prev_value = x;
@@ -212,7 +212,7 @@ sensor:
     disabled_by_default: True
     filters:
       # only publish raw 10hz sensor value during events
-      - lambda: |-
+      - lambda: !lambda |-
           if (id(activity_detected).state) {
             return x;
           } else {
@@ -239,13 +239,13 @@ sensor:
       - sensor.template.publish:
           id: weight_value
           state: !lambda "return x - id(tare_value) - id(auto_tare_value);"
-      - lambda: |- # Auto Tare
+      - lambda: !lambda |- # Auto Tare
           if (abs(id(weight_value).state) < 0.005 && id(activity_detected).state == false) {
             if (id(weight_value).state != 0.0) {
               id(auto_tare_value) += id(weight_value).state;
             }
           }
-      - lambda: |- # Reading Stability
+      - lambda: !lambda |- # Reading Stability
           static float prev_value = 0.0;
           if (abs(x - prev_value) < ${vibration_threshold}) {
             id(vibration_detected).publish_state(false);
@@ -261,14 +261,14 @@ sensor:
     unit_of_measurement: "kg"
     accuracy_decimals: 3
     filters:
-      - lambda: |-
+      - lambda: !lambda |-
           if (abs(x) < 0.001) {
             return 0.0;
           } else {
             return x;
           }
     on_value:
-      - lambda: |- # Is a known cat
+      - lambda: !lambda |- # Is a known cat
           bool is_cat_1 = abs(id(weight_value).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
           bool is_cat_2 = abs(id(weight_value).state - id(cat2_weight)) / id(cat2_weight) < 0.1;
           if (is_cat_1 || is_cat_2) {
@@ -276,7 +276,7 @@ sensor:
           } else {
             id(cat_detected).publish_state(false);
           }
-      - lambda: |- # Average stable cat weight
+      - lambda: !lambda |- # Average stable cat weight
           if (id(cat_detected).state == true && id(vibration_detected).state == false) {
             id(cat_weight_count) = id(cat_weight_count) + 1;
             id(cat_weight_sum) = id(cat_weight_sum) + id(weight_value).state;
@@ -323,7 +323,7 @@ sensor:
     state_class: measurement
     unit_of_measurement: "d"
     accuracy_decimals: 0
-    lambda: |-
+    lambda: !lambda |-
       auto last_changed = id(litter_changed_date);
       if (last_changed == 0) {
         return 0;
@@ -355,11 +355,11 @@ binary_sensor:
       - delayed_off:
           seconds: ${activity_off_delay}
     on_press:
-      - lambda: |-
+      - lambda: !lambda |-
           id(event_start) = id(homeassistant_time).now().timestamp; 
           ESP_LOGV("ACT", "Activity start! %lu", id(event_start));
     on_release:
-      - lambda: |- # Set cat event data
+      - lambda: !lambda |- # Set cat event data
           // Update cat weight if stable enough
           if (id(current_cat_weight).state > 0.0) {
             bool is_cat_1 = abs(id(current_cat_weight).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
@@ -384,7 +384,7 @@ binary_sensor:
             // Add a visit even if the cat left nothing
             id(visits).publish_state(id(visits).state + 1);
           }
-      - lambda: |- # Set clean event data
+      - lambda: !lambda |- # Set clean event data
           if (id(is_cat_event)) {
             return;
           }
@@ -409,7 +409,7 @@ binary_sensor:
       - delayed_off:
           seconds: ${vibration_off_delay}
     on_press:
-      - lambda: |- # Longest stable duration
+      - lambda: !lambda |- # Longest stable duration
           if (id(is_cat_event) == false) {
             return;
           }
@@ -428,7 +428,7 @@ binary_sensor:
           id(cat_weight_sum) = 0;
           id(cat_weight_count) = 0;
     on_release:
-      - lambda: |-
+      - lambda: !lambda |-
           ESP_LOGV("VBR", "Vibration end! eventStart: %lu", id(event_start));
           if (id(event_start) == 0) {
             return;
@@ -452,7 +452,7 @@ button:
     name: "Reset Deep Clean Timer"
     icon: mdi:reload
     on_press:
-      - lambda: |-
+      - lambda: !lambda |-
           id(litter_changed_date) = id(homeassistant_time).now().timestamp;
       - sensor.template.publish:
           id: litter_life_left
@@ -462,7 +462,7 @@ button:
     icon: mdi:reload
     on_press:
       - script.execute: reset_event
-      - lambda: |-
+      - lambda: !lambda |-
           id(waste_weight).publish_state(0);
           id(visits).publish_state(0);
           id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
@@ -471,7 +471,7 @@ script:
   # Reset all event-related state
   - id: reset_event
     then:
-      - lambda: |-
+      - lambda: !lambda |-
           id(cat_detected).publish_state(false);
           id(current_cat_weight).publish_state(0);
           id(tare_value) = id(hx711_raw_value).state;
