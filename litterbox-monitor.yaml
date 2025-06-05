@@ -5,12 +5,15 @@ substitutions:
   spike_threshold: "4" # kg
   litter_change_interval: "30" # days
   min_clean_event_duration: "30" # seconds
-  cat1_name: "Cat 1"
-  cat2_name: "Cat 2"
   # Timezone of the device, used for daily visits sensors
   # See https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
   # for valid values, e.g. "Europe/Bucharest", "America/New_York", "GMT0"
   timezone: "GMT0"
+  # Seconds of no vibration detected before resetting the event state.
+  # Used as fallback when weight sensor reads above detection thresholds.
+  inactivity_timeout: "60" # seconds
+  cat1_name: "Cat 1"
+  cat2_name: "Cat 2"
 
 globals:
   - id: litterbox_weight
@@ -409,6 +412,7 @@ binary_sensor:
       - delayed_off:
           seconds: ${vibration_off_delay}
     on_press:
+      - script.execute: countdown_inactivity_timeout
       - lambda: !lambda |- # Longest stable duration
           if (id(is_cat_event) == false) {
             return;
@@ -428,6 +432,7 @@ binary_sensor:
           id(cat_weight_sum) = 0;
           id(cat_weight_count) = 0;
     on_release:
+      - script.stop: countdown_inactivity_timeout
       - lambda: !lambda |-
           ESP_LOGV("VBR", "Vibration end! eventStart: %lu", id(event_start));
           if (id(event_start) == 0) {
@@ -482,3 +487,10 @@ script:
           id(stable_duration) = 0;
           id(cat_weight_count) = 0;
           id(cat_weight_sum) = 0;
+  - id: countdown_inactivity_timeout
+    then:
+      - delay: ${inactivity_timeout}s
+      - logger.log:
+          level: INFO
+          format: "Event timeout after ${inactivity_timeout}s of inactivity"
+      - script.execute: reset_event
