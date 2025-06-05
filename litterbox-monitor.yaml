@@ -1,32 +1,60 @@
 substitutions:
-  vibration_off_delay: "4" # seconds
-  activity_off_delay: "4" # seconds
-  vibration_threshold: "0.020" # kg
-  spike_threshold: "4" # kg
-  litter_change_interval: "30" # days
-  min_clean_event_duration: "30" # seconds
+  ## Configuration parameters
+
+  # Cat names to be shown in the Home Assistant UI
+  cat1_name: "Cat 1"
+  cat2_name: "Cat 2"
+
   # Timezone of the device, used for daily visits sensors
   # See https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
   # for valid values, e.g. "Europe/Bucharest", "America/New_York", "GMT0"
   timezone: "GMT0"
-  # Seconds of no vibration detected before resetting the event state.
-  # Used as fallback when weight sensor reads above detection thresholds.
+
+  # Interval in days after which the litter should be changed.
+  # Used for the deep clean reminder.
+  litter_change_interval: "30" # days
+
+  ## Internal parameters
+
+  # Minimum duration of a clean event to be considered valid and automatically
+  # reset the waste and visits counters. Used to distinguish small bumps
+  # from actual clean events. Decrease this value if quick cleaning events
+  # are not detected.
+  min_clean_event_duration: "30" # seconds
+
+  # Duration of no vibration detected before vibration sensor is considered off.
+  vibration_off_delay: "4" # seconds
+
+  # Relative weight change between two consecutive readings to consider
+  # as vibration. Used to filter out small noise from the weight sensor.
+  vibration_threshold: "0.020" # kg
+
+  # Duration of no activity (vibration, cat, or occupancy) detected before
+  # the event should be considered over. Compounded with the vibration delay.
+  activity_off_delay: "4" # seconds
+
+  # Relative weight change between two consecutive readings to consider
+  # as a spurious measurement.
+  # Used to filter out big outliers from the weight sensor.
+  spike_threshold: "4" # kg
+
+  # Duration of no vibration detected before forcing the event to be over.
+  # Used as fallback when weight sensor reads above detection thresholds after
+  # a litterbox event.
   inactivity_timeout: "60" # seconds
-  cat1_name: "Cat 1"
-  cat2_name: "Cat 2"
 
 globals:
   - id: litterbox_weight
     type: float
-    initial_value: "0.0" # TODO: Set to the weight of the empty litterbox
+    initial_value: "0.0" # FIXME: Set to the weight of the empty litterbox
     restore_value: False
   - id: cat1_weight
     type: float
-    initial_value: "0.0" # TODO: Set to the weight of the first cat
+    initial_value: "0.0" # FIXME: Set to the starting weight of the first cat
     restore_value: True
   - id: cat2_weight
     type: float
-    initial_value: "0.0" # TODO: Set to the weight of the second cat
+    initial_value: "0.0" # FIXME: Set to the starting weight of the second cat
     restore_value: True
   - id: cat1_daily_visits
     type: int
@@ -36,7 +64,8 @@ globals:
     type: int
     initial_value: "0"
     restore_value: True
-  # -------
+
+  # No changes necessary below this line
   - id: tare_value
     type: float
     initial_value: "0.0"
@@ -172,7 +201,6 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
     lambda: !lambda return id(cat2_daily_visits);
-  # ----
   - platform: hx711
     id: hx711_analog_value
     name: "Analog sensor value"
@@ -191,7 +219,7 @@ sensor:
     accuracy_decimals: 3
     internal: true
     filters:
-      - calibrate_linear:
+      - calibrate_linear: # FIXME: Set the calibration values for your HX711
           - 205901 -> 0.0
           - 1794742 -> 12.441
       - lambda: if (x > 40.0 || x < -20.0) { return {}; } else { return x; }
@@ -363,6 +391,13 @@ binary_sensor:
           ESP_LOGV("ACT", "Activity start! %lu", id(event_start));
     on_release:
       - lambda: !lambda |- # Set cat event data
+          // TODO: Revisit logic.
+          // Figure out how to distinguish between cat playing nearby
+          // and cat actually using the litterbox to add a visit correctly.
+          // This might not be necessary because if a cat attempts to use
+          // the litterbox (i.e. crouch and stay still), the vibration 
+          // sensor would trigger a stable weight reading.
+
           // Update cat weight if stable enough
           if (id(current_cat_weight).state > 0.0) {
             bool is_cat_1 = abs(id(current_cat_weight).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
@@ -476,6 +511,10 @@ script:
   # Reset all event-related state
   - id: reset_event
     then:
+     logger.log:
+          level: DEBUG
+          format: "Resetting event state"
+      - script.stop: countdown_inactivity_timeout
       - lambda: !lambda |-
           id(cat_detected).publish_state(false);
           id(current_cat_weight).publish_state(0);
@@ -487,6 +526,7 @@ script:
           id(stable_duration) = 0;
           id(cat_weight_count) = 0;
           id(cat_weight_sum) = 0;
+  # Begin a countdown for inactivity timeout
   - id: countdown_inactivity_timeout
     then:
       - delay: ${inactivity_timeout}s
