@@ -5,6 +5,8 @@ substitutions:
   spike_threshold: "4" # kg
   litter_change_interval: "30" # days
   min_clean_event_duration: "30" # seconds
+  cat1_name: "Cat 1"
+  cat2_name: "Cat 2"
 
 globals:
   - id: litterbox_weight
@@ -114,7 +116,7 @@ time:
 
 sensor:
   - platform: template
-    name: "Cat 1 Weight"
+    name: "${cat1_name} Weight"
     id: cat1_weight_sensor
     icon: "mdi:scale-bathroom"
     device_class: weight
@@ -123,7 +125,7 @@ sensor:
     unit_of_measurement: kg
     lambda: return id(cat1_weight);
   - platform: template
-    name: "Cat 2 Weight"
+    name: "${cat2_name} Weight"
     id: cat2_weight_sensor
     icon: "mdi:scale-bathroom"
     device_class: weight
