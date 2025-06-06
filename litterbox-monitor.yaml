@@ -202,8 +202,8 @@ sensor:
     accuracy_decimals: 0
     lambda: !lambda return id(cat2_daily_visits);
   - platform: hx711
-    id: hx711_analog_value
-    name: "Analog sensor value"
+    id: hx711_raw_value
+    name: "Raw sensor value"
     dout_pin: GPIO16
     clk_pin: GPIO4
     gain: 128
@@ -211,8 +211,8 @@ sensor:
     entity_category: diagnostic
     disabled_by_default: True
   - platform: copy
-    id: hx711_value
-    source_id: hx711_analog_value
+    id: hx711_calibrated_value
+    source_id: hx711_raw_value
     unit_of_measurement: "kg"
     device_class: weight
     state_class: measurement
@@ -238,7 +238,7 @@ sensor:
     name: "Unfiltered Weight"
     icon: "mdi:scale-unbalanced"
     entity_category: diagnostic
-    source_id: hx711_value
+    source_id: hx711_calibrated_value
     internal: False
     disabled_by_default: True
     filters:
@@ -251,9 +251,9 @@ sensor:
           }
 
   - platform: copy
-    id: hx711_raw_value
-    source_id: hx711_value
-    name: "Raw Weight"
+    id: hx711_filtered_value
+    source_id: hx711_calibrated_value
+    name: "Filtered Weight"
     icon: "mdi:scale-unbalanced"
     entity_category: diagnostic
     unit_of_measurement: "kg"
@@ -268,12 +268,12 @@ sensor:
           quantile: 0.9
     on_value:
       - sensor.template.publish:
-          id: weight_value
+          id: tared_weight
           state: !lambda "return x - id(tare_value) - id(auto_tare_value);"
       - lambda: !lambda |- # Auto Tare
-          if (abs(id(weight_value).state) < 0.005 && id(activity_detected).state == false) {
-            if (id(weight_value).state != 0.0) {
-              id(auto_tare_value) += id(weight_value).state;
+          if (abs(id(tared_weight).state) < 0.005 && id(activity_detected).state == false) {
+            if (id(tared_weight).state != 0.0) {
+              id(auto_tare_value) += id(tared_weight).state;
             }
           }
       - lambda: !lambda |- # Reading Stability
@@ -285,7 +285,7 @@ sensor:
           }
           prev_value = x;
   - platform: template
-    id: weight_value
+    id: tared_weight
     name: "Tared Weight"
     icon: "mdi:scale"
     entity_category: diagnostic
@@ -300,8 +300,8 @@ sensor:
           }
     on_value:
       - lambda: !lambda |- # Is a known cat
-          bool is_cat_1 = abs(id(weight_value).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
-          bool is_cat_2 = abs(id(weight_value).state - id(cat2_weight)) / id(cat2_weight) < 0.1;
+          bool is_cat_1 = abs(id(tared_weight).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
+          bool is_cat_2 = abs(id(tared_weight).state - id(cat2_weight)) / id(cat2_weight) < 0.1;
           if (is_cat_1 || is_cat_2) {
             id(cat_detected).publish_state(true);
           } else {
@@ -310,7 +310,7 @@ sensor:
       - lambda: !lambda |- # Average stable cat weight
           if (id(cat_detected).state == true && id(vibration_detected).state == false) {
             id(cat_weight_count) = id(cat_weight_count) + 1;
-            id(cat_weight_sum) = id(cat_weight_sum) + id(weight_value).state;
+            id(cat_weight_sum) = id(cat_weight_sum) + id(tared_weight).state;
           }
   - platform: template
     unit_of_measurement: g
@@ -367,7 +367,7 @@ sensor:
 
 binary_sensor:
   - platform: analog_threshold
-    sensor_id: weight_value
+    sensor_id: tared_weight
     name: "Occupancy"
     device_class: occupancy
     entity_category: diagnostic
@@ -415,7 +415,7 @@ binary_sensor:
             }
 
             // Add to total waste in litterbox if the cat was stable enough to leave something
-            id(waste_weight).publish_state(id(waste_weight).state + max(id(weight_value).state * 1000, 0.0f));
+            id(waste_weight).publish_state(id(waste_weight).state + max(id(tared_weight).state * 1000, 0.0f));
           }
 
           if (id(is_cat_event)) {
@@ -433,7 +433,7 @@ binary_sensor:
             return;
           }
 
-          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+          id(litter_weight).publish_state(id(hx711_filtered_value).state - id(litterbox_weight));
           id(waste_weight).publish_state(0.0);
           id(visits).publish_state(0);
       - script.execute: reset_event
@@ -505,7 +505,7 @@ button:
       - lambda: !lambda |-
           id(waste_weight).publish_state(0);
           id(visits).publish_state(0);
-          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+          id(litter_weight).publish_state(id(hx711_filtered_value).state - id(litterbox_weight));
 
 script:
   # Reset all event-related state
@@ -518,7 +518,7 @@ script:
       - lambda: !lambda |-
           id(cat_detected).publish_state(false);
           id(current_cat_weight).publish_state(0);
-          id(tare_value) = id(hx711_raw_value).state;
+          id(tare_value) = id(hx711_filtered_value).state;
           id(auto_tare_value) = 0;
           id(is_cat_event) = false;
           id(event_start) = 0;
