@@ -535,6 +535,7 @@ script:
           id(cat_weight_sum) = 0;
   # Begin a countdown for event timeout
   - id: event_timeout
+    mode: restart
     then:
       - delay: ${event_timeout}s
       - logger.log:
