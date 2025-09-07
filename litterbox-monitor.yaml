@@ -177,7 +177,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: return id(cat1_weight);
+    lambda: !lambda return id(cat1_weight);
   - platform: template
     name: "${cat2_name} Weight"
     id: cat2_weight_sensor
@@ -186,7 +186,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: return id(cat2_weight);
+    lambda: !lambda return id(cat2_weight);
   - platform: template
     name: "${cat1_name} Daily Visits"
     id: cat1_daily_visits_sensor
@@ -222,7 +222,7 @@ sensor:
       - calibrate_linear: # FIXME: Set the calibration values for your HX711
           - 205901 -> 0.0
           - 1794742 -> 12.441
-      - lambda: if (x > 40.0 || x < -20.0) { return {}; } else { return x; }
+      - lambda: !lambda if (x > 40.0 || x < -20.0) { return {}; } else { return x; }
       - lambda: !lambda |-
           static float prev_value = 0.0;
           if (abs(x - prev_value) < ${spike_threshold}) {
@@ -344,7 +344,7 @@ sensor:
     device_class: weight
     unit_of_measurement: kg
     entity_category: diagnostic
-    lambda: return id(litterbox_weight);
+    lambda: !lambda return id(litterbox_weight);
     disabled_by_default: True
   - platform: template
     id: litter_life_left
@@ -381,7 +381,7 @@ binary_sensor:
     id: activity_detected
     entity_category: diagnostic
     device_class: motion
-    lambda: return id(cat_detected).state || id(vibration_detected).state || id(occupancy_detected).state;
+    lambda: !lambda return id(cat_detected).state || id(vibration_detected).state || id(occupancy_detected).state;
     filters:
       - delayed_off:
           seconds: ${activity_off_delay}
@@ -485,7 +485,7 @@ binary_sensor:
       - delayed_on:
           seconds: 2
     on_press:
-      - lambda: id(is_cat_event) = true;
+      - lambda: !lambda id(is_cat_event) = true;
 
 button:
   - platform: template
