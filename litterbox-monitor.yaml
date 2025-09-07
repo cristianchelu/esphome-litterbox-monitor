@@ -22,6 +22,9 @@ substitutions:
   # are not detected.
   min_clean_event_duration: "30" # seconds
 
+  #  Minimum weight threshold to consider a clean event valid.
+  min_clean_event_weight: "-10" # g
+
   # Duration of no vibration detected before vibration sensor is considered off.
   vibration_off_delay: "4" # seconds
 
@@ -433,6 +436,10 @@ binary_sensor:
             return;
           }
 
+          if (id(weight_value).state > ${min_clean_event_weight} / 1000) {
+            return; // -10g treshold for scooping
+          }
+
           id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
           id(waste_weight).publish_state(0.0);
           id(visits).publish_state(0);
@@ -511,7 +518,7 @@ script:
   # Reset all event-related state
   - id: reset_event
     then:
-     logger.log:
+      - logger.log:
           level: DEBUG
           format: "Resetting event state"
       - script.stop: event_timeout
