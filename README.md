@@ -29,30 +29,31 @@ Tools required: Kitchen scale, Bathroom scale, weights totalling 4~5kg.
    This can be easily done with weighing yourself on a bathroom scale,
    then weighing yourself again while holding your cat, and
    subtracting the difference.
-2. Take your weights and measure them to the nearest gram
+2. Flash the configuration to your device.
+3. Take your weights and measure them to the nearest gram
    on a known good kitchen scale.
    - Note: All scales become inaccurate nearing their maximum capacity.
            For example, with a "5kg max" scale, measure 2 x 2L bottles of 
            water instead of one 5L bottle for best results.
-3. Flash the configuration to your device.
-4. Set down the constructed base **without anything on top** on 
+4. Set the `Calibration Known Weight` number entity to the weight you measured (in grams).
+5. Set down the constructed base **without anything on top** on 
    a **flat and level** surface. Use shims if you need to.
-5. Press the `Calibrate Scale` button. This will capture the zero point (tare).
-6. Set the `Calibration Known Weight` number entity to the weight you measured (in grams).
+6. Press the `Calibrate Scale` button. This will capture the zero point (tare).
 7. Place the known weights on the base and press the `Calibrate Scale` button again.
    This will complete the calibration process.
    - The "Raw weight" sensor should now read the weight you placed on it,
      and the "Calibration Last Performed" sensor should read the current time.
      If this is not the case, consult the ESPHome logs for errors and repeat
-     steps 4-7.
+     steps 5-7.
    
-8. Note the empty litterbox weight by triggering the `Reset Clean` button, setting
-   the empty litterbox on top of the base, and noting down the `Tared Weight` sensor reading.
+8. ***Optional*** Fill in "Empty Box Weight" number entity to the weight of the
+    empty litterbox (in grams). This will improve the accuracy of the
+    "Litter Remaining" sensor. You can place the box on the monitor and read
+    the "Raw weight" sensor to get this value.
 
-   Set this as the `initial_value` for the `litterbox_weight` sensor in the YAML configuration.
-
-9. Re-flash the config with the updated litterbox weight, set the litterbox on top, 
-   add the litter and trigger the `Reset clean` button. The monitor is now ready to be used.
+9. Set the litterbox on top, add the litter and trigger the `Reset clean` button.
+   
+The monitor is now ready to be used.
 
 ### Adding Extra Cats
 

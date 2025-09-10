@@ -47,10 +47,6 @@ substitutions:
   event_timeout: "60" # seconds
 
 globals:
-  - id: litterbox_weight
-    type: float
-    initial_value: "0.0" # FIXME: Set to the weight of the empty litterbox
-    restore_value: False
   - id: cat1_weight
     type: float
     initial_value: "0.0" # FIXME: Set to the starting weight of the first cat
@@ -369,14 +365,6 @@ sensor:
     update_interval: never
     state_class: measurement
   - platform: template
-    name: "Litterbox Weight"
-    icon: "mdi:tray"
-    device_class: weight
-    unit_of_measurement: kg
-    entity_category: diagnostic
-    lambda: !lambda return id(litterbox_weight);
-    disabled_by_default: True
-  - platform: template
     id: litter_life_left
     name: "Deep Clean Timer"
     icon: mdi:broom
@@ -418,6 +406,20 @@ number:
     initial_value: "1000"
     entity_category: diagnostic
     disabled_by_default: True
+  - platform: template
+    name: "Empty Box Weight"
+    id: litterbox_weight
+    icon: "mdi:tray"
+    device_class: weight
+    unit_of_measurement: g
+    entity_category: diagnostic
+    optimistic: true
+    min_value: 0
+    max_value: 10000
+    step: 1
+    mode: box
+    initial_value: "0"
+    restore_value: True
 
 binary_sensor:
   - platform: analog_threshold
@@ -491,7 +493,7 @@ binary_sensor:
             return; // -10g treshold for scooping
           }
 
-          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+          id(litter_weight).publish_state(id(hx711_raw_value).state - (id(litterbox_weight).state/1000.0));
           id(waste_weight).publish_state(0.0);
           id(visits).publish_state(0);
       - script.execute: reset_event
@@ -563,7 +565,7 @@ button:
       - lambda: !lambda |-
           id(waste_weight).publish_state(0);
           id(visits).publish_state(0);
-          id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+          id(litter_weight).publish_state(id(hx711_raw_value).state - (id(litterbox_weight).state/1000.0));
   - platform: template
     name: "Calibrate Scale"
     icon: mdi:scale-bathroom
