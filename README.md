@@ -21,36 +21,38 @@ cat visits, waste, and litter status using load cells.
 
 ### Initial calibration
 
+Tools required: Kitchen scale, Bathroom scale, weights totalling 4~5kg.
+
 1. Take the approximate weight of your cats and populate the `initial_value`
    of each of their `cat1_weight`,`cat2_weight`,etc. sensors.
 
    This can be easily done with weighing yourself on a bathroom scale,
    then weighing yourself again while holding your cat, and
    subtracting the difference.
+2. Take your weights and measure them to the nearest gram
+   on a known good kitchen scale.
+   - Note: All scales become inaccurate nearing their maximum capacity.
+           For example, with a "5kg max" scale, measure 2 x 2L bottles of 
+           water instead of one 5L bottle for best results.
+3. Flash the configuration to your device.
+4. Set down the constructed base **without anything on top** on 
+   a **flat and level** surface. Use shims if you need to.
+5. Press the `Calibrate Scale` button. This will capture the zero point (tare).
+6. Set the `Calibration Known Weight` number entity to the weight you measured (in grams).
+7. Place the known weights on the base and press the `Calibrate Scale` button again.
+   This will complete the calibration process.
+   - The "Raw weight" sensor should now read the weight you placed on it,
+     and the "Calibration Last Performed" sensor should read the current time.
+     If this is not the case, consult the ESPHome logs for errors and repeat
+     steps 4-7.
+   
+8. Note the empty litterbox weight by triggering the `Reset Clean` button, setting
+   the empty litterbox on top of the base, and noting down the `Tared Weight` sensor reading.
 
-2. Set down the constructed base without anything on top on a **flat and level** surface.
-   Use shims if you need to.
-3. Wait for it to settle, then note the `Unfiltered Weight` value. This is the `0` value.
-4. Take some weights (e.g. a 5L bottle, or multiple 2L bottles) and measure them
-   on a known good scale (e.g. a kitchen scale with 1 gram accuracy)
-5. Set the weights on the base, and after a few seconds to settle, note the
-   `Unfiltered Weight` value again.
-6. In the YAML configuration, replace the values in the `calibrate_linear`
-   section of the `hx711_value` sensor with your values in kilograms. e.g.
-   ```yaml
-   - calibrate_linear:
-       - 205901 ->  0.0 # raw measured zero value -> 0
-       - 1794742 -> 12.441 # raw measured known value -> known kilogram weight
-   ```
-7. Note the empty litterbox weight. If it's too heavy or doesn't physically fit
-   on a kitchen scale with gram accuracy, you can flash the calibrated config
-   from step 6, trigger the `Reset Clean` button, set the empty litterbox on
-   top of the base, and note down the `Tared Weight` sensor reading.
+   Set this as the `initial_value` for the `litterbox_weight` sensor in the YAML configuration.
 
-   Set this as the `initial_value` for the `litterbox_weight` sensor.
-
-8. Flash the config, set the litterbox on top, add the litter and trigger the
-   `Reset clean` button. The monitor is now ready to be used.
+9. Re-flash the config with the updated litterbox weight, set the litterbox on top, 
+   add the litter and trigger the `Reset clean` button. The monitor is now ready to be used.
 
 ### Adding Extra Cats
 
@@ -120,13 +122,14 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 ## TODO
 
-- Distinguish urination/defecation/no-waste events.
-- Calculate trends and alert for outliers.
-- Distinguish cats of similar weight.
-- Automatic deep clean detection.
-- Runtime assisted calibration.
-- Easier adding/removing of pets.
-- Error state detection (debris stuck underneath, box misaligned)
+- [x] Runtime assisted calibration.
+- [ ] Automatic periodic calibration using the empty litterbox weight.
+- [ ] Distinguish urination/defecation/no-waste events.
+- [ ] Calculate trends and alert for outliers.
+- [ ] Distinguish cats of similar weight.
+- [ ] Automatic deep clean detection.
+- [ ] Easier adding/removing of pets.
+- [ ] Error state detection (debris stuck underneath, box misaligned)
 
 ## Acknowledgements
 

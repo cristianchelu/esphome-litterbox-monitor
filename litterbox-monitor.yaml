@@ -106,6 +106,24 @@ globals:
     initial_value: "0"
     restore_value: False
 
+  # Scale calibration parameters
+  - id: calibration_timestamp
+    type: time_t
+    initial_value: "0"
+    restore_value: True
+  - id: calibration_tare
+    type: float
+    initial_value: "0.0"
+    restore_value: True
+  - id: calibration_tare_temp
+    type: float
+    initial_value: "0.0"
+    restore_value: False
+  - id: calibration_coefficient
+    type: float
+    initial_value: "1.0"
+    restore_value: True
+
 esphome:
   name: litterbox
   friendly_name: Litterbox
@@ -120,7 +138,7 @@ esp32:
     type: esp-idf
 
 logger:
-  level: ERROR
+  level: INFO
 
 api:
   encryption:
@@ -142,6 +160,16 @@ api:
                 id(cat2_weight_sensor).publish_state(weight);
                 return;
             }
+    - service: calibration_tare
+      then:
+        - script.execute: calibrate_tare
+    - service: calibration_weight
+      variables:
+        known_weight_kg: float
+      then:
+        - script.execute:
+            id: calibrate_weight
+            known_weight_kg: !lambda return known_weight_kg;
 
 ota:
   - platform: esphome
@@ -222,9 +250,8 @@ sensor:
     accuracy_decimals: 3
     internal: true
     filters:
-      - calibrate_linear: # FIXME: Set the calibration values for your HX711
-          - 205901 -> 0.0
-          - 1794742 -> 12.441
+      - lambda: !lambda |-
+          return (x - id(calibration_tare)) / id(calibration_coefficient);
       - lambda: !lambda if (x > 40.0 || x < -20.0) { return {}; } else { return x; }
       - lambda: !lambda |-
           static float prev_value = 0.0;
@@ -367,6 +394,30 @@ sensor:
       double now = id(homeassistant_time).now().timestamp;
       double dur = last_changed + (${litter_change_interval} * seconds_per_day) - now;
       return std::max(std::floor(dur / seconds_per_day), (double)0);
+  - platform: template
+    id: calibration_last_performed
+    name: "Calibration Last Performed"
+    icon: mdi:calendar-clock
+    device_class: timestamp
+    entity_category: diagnostic
+    lambda: !lambda |-
+      time_t timestamp = id(calibration_timestamp);
+      return timestamp == 0 ? NAN : timestamp;
+
+number:
+  - platform: template
+    name: "Calibration Known Weight"
+    id: calibration_known_weight
+    icon: mdi:weight-kilogram
+    min_value: 1000
+    max_value: 10000
+    step: 100
+    mode: box
+    unit_of_measurement: "g"
+    optimistic: true
+    initial_value: "1000"
+    entity_category: diagnostic
+    disabled_by_default: True
 
 binary_sensor:
   - platform: analog_threshold
@@ -513,6 +564,19 @@ button:
           id(waste_weight).publish_state(0);
           id(visits).publish_state(0);
           id(litter_weight).publish_state(id(hx711_raw_value).state - id(litterbox_weight));
+  - platform: template
+    name: "Calibrate Scale"
+    icon: mdi:scale-bathroom
+    on_press:
+      - if:
+          condition:
+            lambda: !lambda return id(calibration_tare_temp) == 0.0;
+          then:
+            - script.execute: calibrate_tare
+          else:
+            - script.execute:
+                id: calibrate_weight
+                known_weight_kg: !lambda return id(calibration_known_weight).state / 1000.0;
 
 script:
   # Reset all event-related state
@@ -542,3 +606,69 @@ script:
           level: INFO
           format: "Event timeout after ${event_timeout}s of inactivity"
       - script.execute: reset_event
+  # Calibration related scripts
+  - id: calibrate_tare
+    then:
+      - logger.log:
+          level: INFO
+          tag: calibration
+          format: "Waiting for stable reading..."
+      - wait_until:
+          condition:
+            binary_sensor.is_off: vibration_detected
+          timeout: 10s
+      - if:
+          condition:
+            binary_sensor.is_off: vibration_detected
+          then:
+            - lambda: !lambda |-
+                id(calibration_tare_temp) = id(hx711_analog_value).raw_state;
+            - logger.log:
+                level: INFO
+                tag: calibration
+                format: "Place known weight and execute 'Calibrate Weight'"
+          else:
+            - logger.log:
+                level: ERROR
+                tag: calibration
+                format: "Failed to capture tare value due to instability. Try again."
+  - id: calibrate_weight
+    parameters:
+      known_weight_kg: float
+    then:
+      - logger.log:
+          level: INFO
+          tag: calibration
+          format: "Waiting for stable reading..."
+      - wait_until:
+          condition:
+            binary_sensor.is_off: vibration_detected
+          timeout: 10s
+      - if:
+          condition:
+            binary_sensor.is_off: vibration_detected
+          then:
+            - logger.log:
+                level: INFO
+                tag: calibration
+                format: "Calculating new calibration coefficient..."
+            - lambda: !lambda |-
+                float measured_raw = id(hx711_analog_value).raw_state - id(calibration_tare_temp);
+
+                float new_coefficient = measured_raw / known_weight_kg;
+
+                id(calibration_tare) = id(calibration_tare_temp);
+                id(calibration_coefficient) = new_coefficient;
+                id(calibration_tare_temp) = 0;
+                id(calibration_timestamp) = id(homeassistant_time).now().timestamp;
+                id(calibration_last_performed).update();
+
+                ESP_LOGI("calibration", "New tare: %.2f, New coefficient: %.2f", id(calibration_tare), new_coefficient);
+          else:
+            - logger.log:
+                level: ERROR
+                tag: calibration
+                format: "Failed to capture weight value due to instability. Try again."
+            - globals.set:
+                id: calibration_tare_temp
+                value: "0.0"
