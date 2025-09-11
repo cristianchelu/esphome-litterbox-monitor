@@ -11,7 +11,7 @@ cat visits, waste, and litter status using load cells.
 - **Multiple cat detection:** Identifies cats by weight (supports 1-5 cats).
 - **Waste weight tracking:** Tracks total accumulated waste after each visit.
 - **Remaining litter tracking:** Calculates remaining litter after clean events.
-- **Deep clean / replace litter reminder:** Notifies when it's time to change litter.
+- **Deep clean / replace litter reminder:** Notifies when it's time to change litter (configurable interval).
 - **Clean event detection:** Detects and resets waste/litter counters after removing waste.
 - **Visit counting:** Tracks the number of cat visits between cleans and daily for each cat.
 - **Automatic tare:** Maintains accurate zeroing of the scale.
@@ -135,6 +135,12 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 - **Deep Clean Timer:** Days left until next recommended deep clean / litter change.
 - **Occupancy, Activity, Vibration, Cat Event:** Diagnostic sensors for event detection.
 - **Raw/Unfiltered/Tared Weight:** Diagnostic weight readings.
+
+## Number Entities
+
+- **Litter Change Interval:** Configure the number of days between deep clean reminders (7-30 days, default: 30).
+- **Calibration Known Weight:** Weight of calibration objects used during scale setup (diagnostic).
+- **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations (diagnostic).
 
 ## Buttons
 

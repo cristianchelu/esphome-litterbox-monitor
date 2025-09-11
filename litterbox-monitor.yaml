@@ -1,5 +1,6 @@
 substitutions:
   ## Configuration parameters
+  ## Modify these to suit your setup
 
   # Cat names to be shown in the Home Assistant UI
   # Enables the corresponding cat sensors.
@@ -13,11 +14,9 @@ substitutions:
   # for valid values, e.g. "Europe/Bucharest", "America/New_York", "GMT0"
   timezone: "GMT0"
 
-  # Interval in days after which the litter should be changed.
-  # Used for the deep clean reminder.
-  litter_change_interval: "30" # days
 
   ## Internal parameters
+  ## Modify these only if you know what you're doing
 
   # Minimum duration of a clean event to be considered valid and automatically
   # reset the waste and visits counters. Used to distinguish small bumps
@@ -52,14 +51,14 @@ substitutions:
 globals:
   ## General state
 
-  # Known cat weights (kg)
+  # Known cat weights
   - id: cat_weights
-    type: float[5]
+    type: float[5] # kg
     initial_value: "{0.0, 0.0, 0.0, 0.0, 0.0}"
     restore_value: True
-  # Daily visits per cat (resets at midnight)
+  # Daily visits per cat
   - id: cat_daily_visits
-    type: int[5]
+    type: int[5] # count
     initial_value: "{0, 0, 0, 0, 0}"
     restore_value: True
   # Timestamp of last litter change
@@ -89,9 +88,9 @@ globals:
     initial_value: "0"
     restore_value: False
   
-  # Longest stable duration during the event (seconds)
+  # Longest stable duration during the event
   - id: stable_duration
-    type: uint8_t
+    type: uint8_t # seconds
     initial_value: "0"
     restore_value: False
   
@@ -110,15 +109,15 @@ globals:
   
   ## Scale calibration parameters
   
-  # Auto-tare at event end (kg)
+  # Auto-tare at event end
   - id: tare_value
-    type: float
+    type: float # kg
     initial_value: "0.0"
     restore_value: True
 
-  # Running auto-tare at idle to account for temperature drift (kg)
+  # Running auto-tare at idle to account for temperature drift
   - id: auto_tare_value
-    type: float
+    type: float # kg
     initial_value: "0.0"
     restore_value: True
 
@@ -128,22 +127,22 @@ globals:
     initial_value: "0"
     restore_value: True
 
-  # Calibration tare when empty (sensor counts)
+  # Calibration tare when empty
   - id: calibration_tare
-    type: float
+    type: float # sensor counts
     initial_value: "0.0"
     restore_value: True
 
   # Temporary tare value during calibration process
   # Allows for cancelling calibration without affecting the last known good tare.
   - id: calibration_tare_temp
-    type: float
+    type: float # sensor counts
     initial_value: "0.0"
     restore_value: False
   
-  # Calibration slope (counts/kg)
+  # Calibration slope
   - id: calibration_coefficient
-    type: float
+    type: float # counts/kg
     initial_value: "1.0"
     restore_value: True
 
@@ -474,10 +473,10 @@ sensor:
       if (last_changed == 0) {
         return 0;
       }
-
       const double seconds_per_day = 60 * 60 * 24;
+      auto interval = id(litter_change_interval).state;
       double now = id(homeassistant_time).now().timestamp;
-      double dur = last_changed + (${litter_change_interval} * seconds_per_day) - now;
+      double dur = last_changed + (interval * seconds_per_day) - now;
       return std::max(std::floor(dur / seconds_per_day), (double)0);
   - platform: template
     id: calibration_last_performed
@@ -490,6 +489,20 @@ sensor:
       return timestamp == 0 ? NAN : timestamp;
 
 number:
+  # Interval in days after which the litter should be changed.
+  # Used for the deep clean reminder.
+  - platform: template
+    name: "Litter Change Interval"
+    id: litter_change_interval
+    icon: mdi:broom
+    min_value: 7
+    max_value: 30
+    step: 1
+    mode: box
+    unit_of_measurement: "d"
+    optimistic: true
+    initial_value: "30"
+    entity_category: config
   - platform: template
     name: "Calibration Known Weight"
     id: calibration_known_weight
@@ -655,9 +668,7 @@ button:
     on_press:
       - lambda: !lambda |-
           id(litter_changed_date) = id(homeassistant_time).now().timestamp;
-      - sensor.template.publish:
-          id: litter_life_left
-          state: ${litter_change_interval}
+      - component.update: litter_life_left
   - platform: template
     name: "Reset Clean"
     icon: mdi:reload
