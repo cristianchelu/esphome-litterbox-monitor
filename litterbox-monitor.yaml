@@ -47,7 +47,7 @@ substitutions:
   # Duration of no vibration detected before forcing the event to be over.
   # Used as fallback when weight sensor reads above detection thresholds after
   # a litterbox event.
-  event_timeout: "60" # seconds
+  event_timeout: "120" # seconds
 
 globals:
   - id: cat_weights
