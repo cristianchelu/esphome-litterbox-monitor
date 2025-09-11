@@ -50,66 +50,98 @@ substitutions:
   event_timeout: "120" # seconds
 
 globals:
+  ## General state
+
+  # Known cat weights (kg)
   - id: cat_weights
     type: float[5]
     initial_value: "{0.0, 0.0, 0.0, 0.0, 0.0}"
     restore_value: True
+  # Daily visits per cat (resets at midnight)
   - id: cat_daily_visits
     type: int[5]
     initial_value: "{0, 0, 0, 0, 0}"
     restore_value: True
-
-  # No changes necessary below this line
-  - id: tare_value
-    type: float
-    initial_value: "0.0"
-    restore_value: True
-  - id: auto_tare_value
-    type: float
-    initial_value: "0.0"
-    restore_value: True
-  - id: event_start
-    type: time_t
-    initial_value: "0"
-    restore_value: False
-  - id: stable_start
-    type: time_t
-    initial_value: "0"
-    restore_value: False
-  - id: stable_duration
-    type: uint8_t
-    initial_value: "0"
-    restore_value: False
-  - id: is_cat_event
-    type: bool
-    initial_value: "false"
-    restore_value: False
+  # Timestamp of last litter change
   - id: litter_changed_date
     type: time_t
     initial_value: "0"
     restore_value: True
+
+
+  ## Event-related state variables
+
+  # Whether a known cat was detected by weight during the event
+  - id: is_cat_event
+    type: bool
+    initial_value: "false"
+    restore_value: False
+
+  # Timestamp of event start (activity first detected)
+  - id: event_start
+    type: time_t
+    initial_value: "0"
+    restore_value: False
+  
+  # Current longest stable duration start timestamp
+  - id: stable_start
+    type: time_t
+    initial_value: "0"
+    restore_value: False
+  
+  # Longest stable duration during the event (seconds)
+  - id: stable_duration
+    type: uint8_t
+    initial_value: "0"
+    restore_value: False
+  
+  # Sum of weight readings during current stable period
   - id: cat_weight_sum
     type: float
     initial_value: "0.0"
     restore_value: False
+
+  # Count of weight readings during current stable period
   - id: cat_weight_count
     type: int
     initial_value: "0"
     restore_value: False
 
-  # Scale calibration parameters
+  
+  ## Scale calibration parameters
+  
+  # Auto-tare at event end (kg)
+  - id: tare_value
+    type: float
+    initial_value: "0.0"
+    restore_value: True
+
+  # Running auto-tare at idle to account for temperature drift (kg)
+  - id: auto_tare_value
+    type: float
+    initial_value: "0.0"
+    restore_value: True
+
+  # Last full calibration timestamp
   - id: calibration_timestamp
     type: time_t
     initial_value: "0"
     restore_value: True
+
+  # Calibration tare when empty (sensor counts)
   - id: calibration_tare
     type: float
     initial_value: "0.0"
     restore_value: True
+
+  # Temporary tare value during calibration process
+  # Allows for cancelling calibration without affecting the last known good tare.
   - id: calibration_tare_temp
     type: float
     initial_value: "0.0"
     restore_value: False
+  
+  # Calibration slope (counts/kg)
   - id: calibration_coefficient
     type: float
     initial_value: "1.0"
