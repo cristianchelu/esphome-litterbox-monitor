@@ -530,7 +530,10 @@ binary_sensor:
               }
 
               if (abs(detected_weight - cat_weight) / cat_weight < 0.1) {
+                id(cat_weights)[i] = detected_weight;
                 id(cat_daily_visits)[i] = id(cat_daily_visits)[i] + 1;
+                ESP_LOGI("CAT", "Updated weight for cat %d: %.2f kg", i + 1, detected_weight);
+                ESP_LOGI("CAT", "Cat %d daily visits: %d", i + 1, id(cat_daily_visits)[i]);
                 break;
               }
             }
