@@ -2,8 +2,11 @@ substitutions:
   ## Configuration parameters
 
   # Cat names to be shown in the Home Assistant UI
-  cat1_name: "Cat 1"
-  cat2_name: "Cat 2"
+  # Enables the corresponding cat sensors.
+  # Add or remove up to 5 cats as needed.
+  cats:
+    - "Cat 1"
+    - "Cat 2"
 
   # Timezone of the device, used for daily visits sensors
   # See https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
@@ -47,21 +50,13 @@ substitutions:
   event_timeout: "60" # seconds
 
 globals:
-  - id: cat1_weight
-    type: float
-    initial_value: "0.0" # FIXME: Set to the starting weight of the first cat
+  - id: cat_weights
+    type: float[5]
+    initial_value: "{0.0, 0.0, 0.0, 0.0, 0.0}"
     restore_value: True
-  - id: cat2_weight
-    type: float
-    initial_value: "0.0" # FIXME: Set to the starting weight of the second cat
-    restore_value: True
-  - id: cat1_daily_visits
-    type: int
-    initial_value: "0"
-    restore_value: True
-  - id: cat2_daily_visits
-    type: int
-    initial_value: "0"
+  - id: cat_daily_visits
+    type: int[5]
+    initial_value: "{0, 0, 0, 0, 0}"
     restore_value: True
 
   # No changes necessary below this line
@@ -146,16 +141,11 @@ api:
         weight: float
       then:
         - lambda: !lambda |-
-            switch(cat) {
-              case 1: 
-                id(cat1_weight) = weight;
-                id(cat1_weight_sensor).publish_state(weight);
-                return;
-              case 2: 
-                id(cat2_weight) = weight;
-                id(cat2_weight_sensor).publish_state(weight);
-                return;
+            if (cat < 1 || cat > 5) {
+              ESP_LOGE("CAT", "Invalid cat index %d. Must be between 1 and 5.", cat);
+              return;
             }
+            id(cat_weights)[cat - 1] = weight;
     - service: calibration_tare
       then:
         - script.execute: calibrate_tare
@@ -190,44 +180,115 @@ time:
         seconds: 0
         then:
           - lambda: !lambda |-
-              id(cat1_daily_visits) = 0;
-              id(cat1_daily_visits_sensor).publish_state(0);
-              id(cat2_daily_visits) = 0;
-              id(cat2_daily_visits_sensor).publish_state(0);
+              for (int i = 0; i < 5; i++) {
+                id(cat_daily_visits)[i] = 0;
+              }
 
 sensor:
+# Cat sensors
   - platform: template
-    name: "${cat1_name} Weight"
+    name: "${cats[0]} Weight"
     id: cat1_weight_sensor
     icon: "mdi:scale-bathroom"
     device_class: weight
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: !lambda return id(cat1_weight);
+    lambda: !lambda return id(cat_weights)[0];
+    internal: False
+    update_interval: 1s
   - platform: template
-    name: "${cat2_name} Weight"
+    name: "${cats[1]} Weight"
     id: cat2_weight_sensor
     icon: "mdi:scale-bathroom"
     device_class: weight
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: !lambda return id(cat2_weight);
+    lambda: !lambda return id(cat_weights)[1];
+    internal: ${cats|length <= 1 or cats[1] == ""}
+    update_interval: 1s
   - platform: template
-    name: "${cat1_name} Daily Visits"
+    name: "${cats[2]} Weight"
+    id: cat3_weight_sensor
+    icon: "mdi:scale-bathroom"
+    device_class: weight
+    state_class: measurement
+    accuracy_decimals: 2
+    unit_of_measurement: kg
+    lambda: !lambda return id(cat_weights)[2];
+    internal: ${cats|length <= 2 or cats[2] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[3]} Weight"
+    id: cat4_weight_sensor
+    icon: "mdi:scale-bathroom"
+    device_class: weight
+    state_class: measurement
+    accuracy_decimals: 2
+    unit_of_measurement: kg
+    lambda: !lambda return id(cat_weights)[3];
+    internal: ${cats|length <= 3 or cats[3] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[4]} Weight"
+    id: cat5_weight_sensor
+    icon: "mdi:scale-bathroom"
+    device_class: weight
+    state_class: measurement
+    accuracy_decimals: 2
+    unit_of_measurement: kg
+    lambda: !lambda return id(cat_weights)[4];
+    internal: ${cats|length <= 4 or cats[4] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[0]} Daily Visits"
     id: cat1_daily_visits_sensor
     icon: "mdi:eye-arrow-left"
     state_class: measurement
     accuracy_decimals: 0
-    lambda: !lambda return id(cat1_daily_visits);
+    lambda: !lambda return id(cat_daily_visits)[0];
+    internal: False
+    update_interval: 1s
   - platform: template
-    name: "${cat2_name} Daily Visits"
+    name: "${cats[1]} Daily Visits"
     id: cat2_daily_visits_sensor
     icon: "mdi:eye-arrow-left"
     state_class: measurement
     accuracy_decimals: 0
-    lambda: !lambda return id(cat2_daily_visits);
+    lambda: !lambda return id(cat_daily_visits)[1];
+    internal: ${cats|length <= 1 or cats[1] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[2]} Daily Visits"
+    id: cat3_daily_visits_sensor
+    icon: "mdi:eye-arrow-left"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_visits)[2];
+    internal: ${cats|length <= 2 or cats[2] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[3]} Daily Visits"
+    id: cat4_daily_visits_sensor
+    icon: "mdi:eye-arrow-left"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_visits)[3];
+    internal: ${cats|length <= 3 or cats[3] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[4]} Daily Visits"
+    id: cat5_daily_visits_sensor
+    icon: "mdi:eye-arrow-left"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_visits)[4];
+    internal: ${cats|length <= 4 or cats[4] == ""}
+    update_interval: 1s
+
+
+# Other sensors
   - platform: hx711
     id: hx711_analog_value
     name: "Analog sensor value"
@@ -326,13 +387,17 @@ sensor:
           }
     on_value:
       - lambda: !lambda |- # Is a known cat
-          bool is_cat_1 = abs(id(weight_value).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
-          bool is_cat_2 = abs(id(weight_value).state - id(cat2_weight)) / id(cat2_weight) < 0.1;
-          if (is_cat_1 || is_cat_2) {
-            id(cat_detected).publish_state(true);
-          } else {
-            id(cat_detected).publish_state(false);
+          for (int i = 0; i < 5; i++) {
+            if (id(cat_weights)[i] == 0.0) {
+              continue;
+            }
+            auto weight = id(cat_weights)[i];
+            if (abs(id(weight_value).state - weight) / weight < 0.1) {
+              id(cat_detected).publish_state(true);
+              return;
+            }
           }
+          id(cat_detected).publish_state(false);
       - lambda: !lambda |- # Average stable cat weight
           if (id(cat_detected).state == true && id(vibration_detected).state == false) {
             id(cat_weight_count) = id(cat_weight_count) + 1;
@@ -455,23 +520,24 @@ binary_sensor:
           // sensor would trigger a stable weight reading.
 
           // Update cat weight if stable enough
-          if (id(current_cat_weight).state > 0.0) {
-            bool is_cat_1 = abs(id(current_cat_weight).state - id(cat1_weight)) / id(cat1_weight) < 0.1;
-            bool is_cat_2 = abs(id(current_cat_weight).state - id(cat2_weight)) / id(cat2_weight) < 0.1;
-            if (is_cat_1) {
-              id(cat1_weight) = id(current_cat_weight).state;
-              id(cat1_weight_sensor).publish_state(id(current_cat_weight).state);
-              id(cat1_daily_visits) = id(cat1_daily_visits) + 1;
-              id(cat1_daily_visits_sensor).publish_state(id(cat1_daily_visits));
-            } else if (is_cat_2) {
-              id(cat2_weight) = id(current_cat_weight).state;
-              id(cat2_weight_sensor).publish_state(id(current_cat_weight).state);
-              id(cat2_daily_visits) = id(cat2_daily_visits) + 1;
-              id(cat2_daily_visits_sensor).publish_state(id(cat2_daily_visits));
+          auto detected_weight = id(current_cat_weight).state;
+          if (detected_weight > 0.0) {
+            for (int i = 0; i < 5; i++) {
+              auto cat_weight = id(cat_weights)[i];
+
+              if (cat_weight == 0.0) {
+                continue;
+              }
+
+              if (abs(detected_weight - cat_weight) / cat_weight < 0.1) {
+                id(cat_daily_visits)[i] = id(cat_daily_visits)[i] + 1;
+                break;
+              }
             }
 
             // Add to total waste in litterbox if the cat was stable enough to leave something
-            id(waste_weight).publish_state(id(waste_weight).state + max(id(weight_value).state * 1000, 0.0f));
+            auto new_waste = id(weight_value).state;
+            id(waste_weight).publish_state(id(waste_weight).state + max(new_waste * 1000, 0.0f));
           }
 
           if (id(is_cat_event)) {

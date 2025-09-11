@@ -8,7 +8,7 @@ cat visits, waste, and litter status using load cells.
 ## Features
 
 - **Weight tracking:** Measures total litterbox weight and detects changes.
-- **Multiple cat detection:** Identifies cats by weight (supports at least two cats).
+- **Multiple cat detection:** Identifies cats by weight (supports 1-5 cats).
 - **Waste weight tracking:** Tracks total accumulated waste after each visit.
 - **Remaining litter tracking:** Calculates remaining litter after clean events.
 - **Deep clean / replace litter reminder:** Notifies when it's time to change litter.
@@ -19,54 +19,75 @@ cat visits, waste, and litter status using load cells.
 
 ## How to Use
 
+### Hardware Setup
+
+Update the configuration with the correct GPIO pins for your HX711,
+as you have wired it to your ESP32.
+
+Change the timezone substitution to your local timezone.
+
+### Configuring Cats
+
+This configuration supports 1-5 cats out of the box. The example substitutions 
+shows two cats, but you should configure this before first flashing:
+
+- Update the `cats` substitution in the YAML configuration to include your 
+  cat names (e.g., "Fluffy", "Whiskers", "Mittens"). Add or remove from the list
+  as needed.
+- Only the cats you define will have corresponding weight and daily visit 
+  sensors available in Home Assistant.
+- After flashing, use the `set_cat_weight` API service to set the weight 
+  for each cat (See Initial Calibration section below).
+
 ### Initial calibration
 
 Tools required: Kitchen scale, Bathroom scale, weights totalling 4~5kg.
 
-1. Take the approximate weight of your cats and populate the `initial_value`
-   of each of their `cat1_weight`,`cat2_weight`,etc. sensors.
-
-   This can be easily done with weighing yourself on a bathroom scale,
-   then weighing yourself again while holding your cat, and
-   subtracting the difference.
-2. Flash the configuration to your device.
-3. Take your weights and measure them to the nearest gram
+1. Take your weights and measure them to the nearest gram
    on a known good kitchen scale.
    - Note: All scales become inaccurate nearing their maximum capacity.
            For example, with a "5kg max" scale, measure 2 x 2L bottles of 
-           water instead of one 5L bottle for best results.
-4. Set the `Calibration Known Weight` number entity to the weight you measured (in grams).
-5. Set down the constructed base **without anything on top** on 
+           water and sum their weights instead of one 5L bottle for best results.
+
+2. Set the `Calibration Known Weight` number entity to the weight 
+   you measured (in grams).
+
+3. Make sure the constructed base is **without anything on top**, resting on
    a **flat and level** surface. Use shims if you need to.
-6. Press the `Calibrate Scale` button. This will capture the zero point (tare).
-7. Place the known weights on the base and press the `Calibrate Scale` button again.
-   This will complete the calibration process.
-   - The "Raw weight" sensor should now read the weight you placed on it,
-     and the "Calibration Last Performed" sensor should read the current time.
-     If this is not the case, consult the ESPHome logs for errors and repeat
-     steps 5-7.
+
+4. Press the `Calibrate Scale` button. This will capture the zero point (tare).
+
+5. Place the known weights on the base and press the `Calibrate Scale` 
+   button again. This will complete the calibration process.
    
-8. ***Optional*** Fill in "Empty Box Weight" number entity to the weight of the
+   The "Raw weight" sensor should now read the weight you placed on it,
+   and the "Calibration Last Performed" sensor should read the current time.
+   If this is not the case, consult the ESPHome logs for errors and repeat
+   steps 2-5.
+   
+6. ***Optional*** Fill in "Empty Box Weight" number entity to the weight of the
     empty litterbox (in grams). This will improve the accuracy of the
     "Litter Remaining" sensor. You can place the box on the monitor and read
     the "Raw weight" sensor to get this value.
 
-9. Set the litterbox on top, add the litter and trigger the `Reset clean` button.
-   
+7. Set the litterbox on top, add the litter and trigger the `Reset clean` button.
+
+8. Take the approximate weight of your cats (within 10%).
+
+   This can be easily done with weighing yourself on a bathroom scale,
+   then weighing yourself again while holding each cat, and
+   subtracting the difference.
+
+   Use the `set_cat_weight` action within Home Assistant to set 
+   an initial value for each cat's weight, in the order you defined them
+   in the configuration (see Actions section below).
+
 The monitor is now ready to be used.
-
-### Adding Extra Cats
-
-By default, the current configuration supports two cats. To add more cats:
-
-- Add new global variables for each cat's weight (e.g., `cat3_weight`).
-- Add new template sensors for each cat.
-- Update the `set_cat_weight` API service and detection logic to handle additional cats.
 
 ### Actions (Services)
 
 - `set_cat_weight`: Set a cat's weight manually via Home Assistant or API.
-  - Parameters: `cat` (int), `weight` (float)
+  - Parameters: `cat` (int, 1-5), `weight` (float)
   - Example: To set Cat 1's weight to 5.2kg, call `set_cat_weight` with `cat=1`, `weight=5.2`.
 
 ### Synchronize Multiple Litterboxes
@@ -106,7 +127,8 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 ## Sensors and Entities
 
-- **Cat 1/2 Weight:** Current weight of each cat.
+- **Cat 1-5 Weight:** Current weight of each cat (only enabled cats are visible).
+- **Cat 1-5 Daily Visits:** Number of visits per day for each cat (only enabled cats are visible).
 - **Waste Weight:** Estimated total accumulated waste (grams) since last clean.
 - **Litter Remaining:** Estimated remaining litter (kg).
 - **Visits:** Number of cat visits since last clean.
@@ -124,12 +146,12 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 ## TODO
 
 - [x] Runtime assisted calibration.
+- [x] Easier adding/removing of pets.
 - [ ] Automatic periodic calibration using the empty litterbox weight.
 - [ ] Distinguish urination/defecation/no-waste events.
 - [ ] Calculate trends and alert for outliers.
 - [ ] Distinguish cats of similar weight.
 - [ ] Automatic deep clean detection.
-- [ ] Easier adding/removing of pets.
 - [ ] Error state detection (debris stuck underneath, box misaligned)
 
 ## Acknowledgements
