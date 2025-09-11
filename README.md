@@ -139,8 +139,8 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 ## Number Entities
 
 - **Litter Change Interval:** Configure the number of days between deep clean reminders (7-30 days, default: 30).
-- **Calibration Known Weight:** Weight of calibration objects used during scale setup (diagnostic).
-- **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations (diagnostic).
+- **Calibration Known Weight:** Weight of calibration objects used during scale setup.
+- **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations.
 
 ## Buttons
 

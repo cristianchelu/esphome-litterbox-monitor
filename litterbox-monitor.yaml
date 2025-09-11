@@ -483,7 +483,6 @@ sensor:
     name: "Calibration Last Performed"
     icon: mdi:calendar-clock
     device_class: timestamp
-    entity_category: diagnostic
     lambda: !lambda |-
       time_t timestamp = id(calibration_timestamp);
       return timestamp == 0 ? NAN : timestamp;
@@ -514,15 +513,15 @@ number:
     unit_of_measurement: "g"
     optimistic: true
     initial_value: "1000"
-    entity_category: diagnostic
-    disabled_by_default: True
+    entity_category: config
+    restore_value: False
   - platform: template
     name: "Empty Box Weight"
     id: litterbox_weight
     icon: "mdi:tray"
     device_class: weight
     unit_of_measurement: g
-    entity_category: diagnostic
+    entity_category: config
     optimistic: true
     min_value: 0
     max_value: 10000
@@ -545,7 +544,6 @@ binary_sensor:
   - platform: template
     name: "Activity"
     id: activity_detected
-    entity_category: diagnostic
     device_class: motion
     lambda: !lambda return id(cat_detected).state || id(vibration_detected).state || id(occupancy_detected).state;
     filters:
