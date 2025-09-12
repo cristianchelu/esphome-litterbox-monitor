@@ -619,7 +619,7 @@ binary_sensor:
       - delayed_off:
           seconds: ${vibration_off_delay}
     on_press:
-      - script.execute: event_timeout
+      - script.stop: event_timeout
       - lambda: !lambda |- # Longest stable duration
           if (id(is_cat_event) == false) {
             return;
@@ -639,7 +639,7 @@ binary_sensor:
           id(cat_weight_sum) = 0;
           id(cat_weight_count) = 0;
     on_release:
-      - script.stop: event_timeout
+      - script.execute: event_timeout
       - lambda: !lambda |-
           ESP_LOGV("VBR", "Vibration end! eventStart: %lu", id(event_start));
           if (id(event_start) == 0) {
