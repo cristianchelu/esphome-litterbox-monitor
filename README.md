@@ -8,32 +8,54 @@ cat visits, waste, and litter status using load cells.
 ## Features
 
 - **Weight tracking:** Measures total litterbox weight and detects changes.
+- ***PoopSense* waste recognition:** Recognizes #1 from #2.
 - **Multiple cat detection:** Identifies cats by weight (supports 1-5 cats).
 - **Waste weight tracking:** Tracks total accumulated waste after each visit.
 - **Remaining litter tracking:** Calculates remaining litter after clean events.
 - **Deep clean / replace litter reminder:** Notifies when it's time to change litter (configurable interval).
 - **Clean event detection:** Detects and resets waste/litter counters after removing waste.
-- **Visit counting:** Tracks the number of cat visits between cleans and daily for each cat.
+- **Visit counting:** Total visits since clean plus per-cat daily visits.
 - **Automatic tare:** Maintains accurate zeroing of the scale.
 - **Home Assistant integration:** All sensors and actions are available in Home Assistant.
 
 ## How to Use
 
+Shared logic lives in [`litterbox-monitor.yaml`](litterbox-monitor.yaml) (the **template**). It does not include API encryption, OTA, or WiFi credentials so you can reuse it for multiple devices. **Compile and flash using a thin device YAML** that includes the template and supplies secrets (see below).
+
+### Device YAML (template + install)
+
+Use [`litterbox-install.example.yaml`](litterbox-install.example.yaml) as your starting point: copy it to a file you will actually build (for example `litterbox.yaml`), set `substitutions` (`name`, `friendly_name`, `cats`, `timezone`, or tuning keys—same keys as in the template), and wire API, OTA, and WiFi with the `!secret` entries shown there. Ensure your `secrets.yaml` defines `litterbox_api_key`, `litterbox_ota_password`, `litterbox_ap_password`, `wifi_ssid`, and `wifi_password`.
+
+The example uses a local `!include` for [`litterbox-monitor.yaml`](litterbox-monitor.yaml). With a local copy, keep [`state_analyzer.h`](state_analyzer.h) in the same directory; the template includes it via `esphome.includes`, so copying only the YAML is not enough (clone the repo or copy both files). 
+
+If you prefer to pull the template from GitHub instead, replace that `packages` entry with:
+
+```yaml
+packages:
+  - litterbox_monitor: github://cristianchelu/esphome-litterbox-monitor/litterbox-monitor.yaml@main
+```
+
+See the [ESPHome packages](https://esphome.io/components/packages/) docs for other package forms, including auto-updating rules.
+
+Run ESPHome against **your device file**, not the template.
+
+For a second litterbox, add another YAML file with a different `name` / `friendly_name` and its own secrets (typically a separate config directory with its own `secrets.yaml`).
+
 ### Hardware Setup
 
-Update the configuration with the correct GPIO pins for your HX711,
+Update [`litterbox-monitor.yaml`](litterbox-monitor.yaml) with the correct GPIO pins for your HX711,
 as you have wired it to your ESP32.
 
-Change the timezone substitution to your local timezone.
+Change the timezone substitution in the template or override `timezone` in your thin device YAML.
 
 ### Configuring Cats
 
 This configuration supports 1-5 cats out of the box. The example substitutions 
 shows two cats, but you should configure this before first flashing:
 
-- Update the `cats` substitution in the YAML configuration to include your 
+- Set the `cats` substitution in your thin device YAML (see [`litterbox-install.example.yaml`](litterbox-install.example.yaml)) with your 
   cat names (e.g., "Fluffy", "Whiskers", "Mittens"). Add or remove from the list
-  as needed.
+  as needed. You do not need to edit [`litterbox-monitor.yaml`](litterbox-monitor.yaml) for this.
 - Only the cats you define will have corresponding weight and daily visit 
   sensors available in Home Assistant.
 - After flashing, use the `set_cat_weight` API service to set the weight 
@@ -100,16 +122,16 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 ### Load Cell Amplifier
 
-- Any HX711 breakout board will work.
+- Any HX711 breakout board will work, BUT:
 - Boards with separate `VCC` (5V for load cells) and `VDD` (3.3V for ESP32 logic) are recommended for best accuracy.
-  - Known good example: [Sparkfun HX711 v1.1](https://www.sparkfun.com/sparkfun-load-cell-amplifier-hx711.html)
+  - Recommended, known good example: [Sparkfun HX711 v1.1](https://www.sparkfun.com/sparkfun-load-cell-amplifier-hx711.html)
   - _BEWARE_ Some no-name breakout boards have separate `VCC` and `VDD` pins but
     electrically tie them together. Supplying 5V to these _will_ kill the esp chip.
     Validate these with a multimeter before applying power.
 
 ### Load Cells
 
-- 4 × 10kg strain gauge load cells (commonly available on AliExpress).
+- 4 × 5-10kg strain gauge load cells (commonly available on AliExpress).
 - Choose the load cell capacity based on:
   - Baseboard + litterbox + litter + heaviest cat + jumping force + safety buffer, divided by 4.
 - Higher capacity load cells reduce measurement resolution.
@@ -127,13 +149,24 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 ## Sensors and Entities
 
-- **Cat 1-5 Weight:** Current weight of each cat (only enabled cats are visible).
+- **Cat 1-5 Weight:** Last weight stored for each cat when PoopSense identifies
+  them on a visit (only enabled cats are visible).
 - **Cat 1-5 Daily Visits:** Number of visits per day for each cat (only enabled cats are visible).
+- **Elimination Type:** Text sensor reporting `no_elimination`,
+  `urination`, `defecation`, `both`, or `unknown` after each analyzed activity.
+- **Event Duration:** Seconds for the activity window that was analyzed (updated
+  when PoopSense runs at the end of activity).
 - **Waste Weight:** Estimated total accumulated waste (grams) since last clean.
 - **Litter Remaining:** Estimated remaining litter (kg).
 - **Visits:** Number of cat visits since last clean.
 - **Deep Clean Timer:** Days left until next recommended deep clean / litter change.
-- **Occupancy, Activity, Vibration, Cat Event:** Diagnostic sensors for event detection.
+- **Cat Weight:** Diagnostic sensor (disabled by default) showing the cat weight
+  in kg from the last PoopSense result.
+- **Occupancy, Activity, Vibration:** Diagnostic sensors for physical presence,
+  combined activity, and scale jitter.
+- **Cat Event:** Diagnostic occupancy-style hint when tared weight is close to a
+  known cat for 2+ seconds (used internally for activity; PoopSense does the
+  full visit analysis when activity ends).
 - **Raw/Unfiltered/Tared Weight:** Diagnostic weight readings.
 
 ## Number Entities
@@ -153,8 +186,8 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 - [x] Runtime assisted calibration.
 - [x] Easier adding/removing of pets.
+- [x] Distinguish urination/defecation/no-waste events (PoopSense).
 - [ ] Automatic periodic calibration using the empty litterbox weight.
-- [ ] Distinguish urination/defecation/no-waste events.
 - [ ] Calculate trends and alert for outliers.
 - [ ] Distinguish cats of similar weight.
 - [ ] Automatic deep clean detection.

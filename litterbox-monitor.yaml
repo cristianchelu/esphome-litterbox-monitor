@@ -2,6 +2,10 @@ substitutions:
   ## Configuration parameters
   ## Modify these to suit your setup
 
+  # Device identity (override in a thin device YAML when using packages)
+  name: litterbox
+  friendly_name: "Litterbox"
+
   # Cat names to be shown in the Home Assistant UI
   # Enables the corresponding cat sensors.
   # Add or remove up to 5 cats as needed.
@@ -82,30 +86,6 @@ globals:
     initial_value: "0"
     restore_value: False
   
-  # Current longest stable duration start timestamp
-  - id: stable_start
-    type: time_t
-    initial_value: "0"
-    restore_value: False
-  
-  # Longest stable duration during the event
-  - id: stable_duration
-    type: uint8_t # seconds
-    initial_value: "0"
-    restore_value: False
-  
-  # Sum of weight readings during current stable period
-  - id: cat_weight_sum
-    type: float
-    initial_value: "0.0"
-    restore_value: False
-
-  # Count of weight readings during current stable period
-  - id: cat_weight_count
-    type: int
-    initial_value: "0"
-    restore_value: False
-
   
   ## Scale calibration parameters
   
@@ -147,9 +127,11 @@ globals:
     restore_value: True
 
 esphome:
-  name: litterbox
-  friendly_name: Litterbox
+  name: ${name}
+  friendly_name: ${friendly_name}
   comment: Smart Litterbox
+  includes:
+    - state_analyzer.h
   project:
     name: "CristianChelu.LitterboxMonitor"
     version: "esp32.hx711"
@@ -163,8 +145,6 @@ logger:
   level: INFO
 
 api:
-  encryption:
-    key: !secret litterbox_api_key
   services:
     - service: set_cat_weight
       variables:
@@ -189,15 +169,9 @@ api:
             known_weight_kg: !lambda return known_weight_kg;
 
 ota:
-  - platform: esphome
-    password: !secret litterbox_ota_password
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
   ap:
-    ssid: "Litterbox Fallback Hotspot"
-    password: !secret litterbox_ap_password
 
 captive_portal:
 
@@ -350,6 +324,13 @@ sensor:
             prev_value = x;
             return {};
           }
+    on_value:
+      - lambda: !lambda |-
+          if (!id(activity_detected).state) return;
+          float tared_g = (x - id(tare_value) - id(auto_tare_value)) * 1000.0f;
+          get_analyzer().process_sample(tared_g, get_sample_idx());
+          get_weight_buf().push(tared_g);
+          get_sample_idx()++;
 
   - platform: copy
     id: hx711_unfiltered_value
@@ -429,11 +410,6 @@ sensor:
             }
           }
           id(cat_detected).publish_state(false);
-      - lambda: !lambda |- # Average stable cat weight
-          if (id(cat_detected).state == true && id(vibration_detected).state == false) {
-            id(cat_weight_count) = id(cat_weight_count) + 1;
-            id(cat_weight_sum) = id(cat_weight_sum) + id(weight_value).state;
-          }
   - platform: template
     unit_of_measurement: g
     name: "Waste Weight"
@@ -486,6 +462,22 @@ sensor:
     lambda: !lambda |-
       time_t timestamp = id(calibration_timestamp);
       return timestamp == 0 ? NAN : timestamp;
+  - platform: template
+    id: event_duration_sensor
+    name: "Event Duration"
+    icon: mdi:timer-outline
+    device_class: duration
+    state_class: measurement
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: never
+
+text_sensor:
+  - platform: template
+    id: elimination_type_sensor
+    name: "Elimination Type"
+    icon: "mdi:toilet"
+    update_interval: never
 
 number:
   # Interval in days after which the litter should be changed.
@@ -551,60 +543,63 @@ binary_sensor:
           seconds: ${activity_off_delay}
     on_press:
       - lambda: !lambda |-
-          id(event_start) = id(homeassistant_time).now().timestamp; 
-          ESP_LOGV("ACT", "Activity start! %lu", id(event_start));
+          id(event_start) = id(homeassistant_time).now().timestamp;
+          get_analyzer().init(id(cat_weights), 5);
+          get_weight_buf().reset();
+          get_sample_idx() = 0;
+          ESP_LOGD("SA", "Activity start, analyzer reset");
     on_release:
-      - lambda: !lambda |- # Set cat event data
-          // TODO: Revisit logic.
-          // Figure out how to distinguish between cat playing nearby
-          // and cat actually using the litterbox to add a visit correctly.
-          // This might not be necessary because if a cat attempts to use
-          // the litterbox (i.e. crouch and stay still), the vibration 
-          // sensor would trigger a stable weight reading.
+      - lambda: !lambda |-
+          time_t now = id(homeassistant_time).now().timestamp;
+          int duration = now - id(event_start);
+          int samples = get_sample_idx();
+          id(is_cat_event) = false;
 
-          // Update cat weight if stable enough
-          auto detected_weight = id(current_cat_weight).state;
-          if (detected_weight > 0.0) {
-            for (int i = 0; i < 5; i++) {
-              auto cat_weight = id(cat_weights)[i];
+          if (duration >= 10 && samples >= 100) {
+            StateResult result = get_analyzer().finalize(
+                get_weight_buf(), id(cat_weights), 5);
 
-              if (cat_weight == 0.0) {
-                continue;
+            ESP_LOGI("SA", "Event: cat=%.0fg waste=%.0fg type=%s cat_idx=%d periods=%d dur=%ds",
+                     result.cat_weight, result.waste_weight,
+                     elimination_type_str(result.elimination_type),
+                     result.detected_cat, result.period_count, duration);
+
+            id(elimination_type_sensor).publish_state(
+                elimination_type_str(result.elimination_type));
+            id(current_cat_weight).publish_state(result.cat_weight / 1000.0f);
+            id(event_duration_sensor).publish_state(duration);
+
+            if (result.detected_cat >= 0) {
+              id(is_cat_event) = true;
+              int ci = result.detected_cat;
+              if (result.cat_weight > 0.0f) {
+                id(cat_weights)[ci] = result.cat_weight / 1000.0f;
               }
-
-              if (abs(detected_weight - cat_weight) / cat_weight < 0.1) {
-                id(cat_weights)[i] = detected_weight;
-                id(cat_daily_visits)[i] = id(cat_daily_visits)[i] + 1;
-                ESP_LOGI("CAT", "Updated weight for cat %d: %.2f kg", i + 1, detected_weight);
-                ESP_LOGI("CAT", "Cat %d daily visits: %d", i + 1, id(cat_daily_visits)[i]);
-                break;
-              }
+              id(cat_daily_visits)[ci]++;
+              ESP_LOGI("CAT", "Cat %d: %.2fkg, daily visits: %d",
+                       ci + 1, id(cat_weights)[ci], id(cat_daily_visits)[ci]);
             }
 
-            // Add to total waste in litterbox if the cat was stable enough to leave something
-            auto new_waste = id(weight_value).state;
-            id(waste_weight).publish_state(id(waste_weight).state + max(new_waste * 1000, 0.0f));
-          }
-
-          if (id(is_cat_event)) {
-            // Add a visit even if the cat left nothing
+            float new_waste = id(weight_value).state;
+            if (new_waste > 0.0f) {
+              id(waste_weight).publish_state(
+                  id(waste_weight).state + new_waste * 1000.0f);
+            }
             id(visits).publish_state(id(visits).state + 1);
+          } else {
+            ESP_LOGD("SA", "Short event skipped: %ds, %d samples", duration, samples);
           }
-      - lambda: !lambda |- # Set clean event data
+      - lambda: !lambda |- # Clean event detection
           if (id(is_cat_event)) {
             return;
           }
           auto now = id(homeassistant_time).now().timestamp;
           if (now - id(event_start) < ${min_clean_event_duration}) {
-            // ignore bumps
-            // TODO: Figure out from vibration pattern what makes a clean event
             return;
           }
-
-          if (id(weight_value).state > ${min_clean_event_weight} / 1000) {
-            return; // -10g treshold for scooping
+          if (id(weight_value).state > ${min_clean_event_weight} / 1000.0f) {
+            return;
           }
-
           id(litter_weight).publish_state(id(hx711_raw_value).state - (id(litterbox_weight).state/1000.0));
           id(waste_weight).publish_state(0.0);
           id(visits).publish_state(0);
@@ -620,32 +615,8 @@ binary_sensor:
           seconds: ${vibration_off_delay}
     on_press:
       - script.stop: event_timeout
-      - lambda: !lambda |- # Longest stable duration
-          if (id(is_cat_event) == false) {
-            return;
-          }
-          time_t now = id(homeassistant_time).now().timestamp;
-          uint8_t dur = now - id(stable_start) + ${vibration_off_delay};
-          ESP_LOGV("VBR", "Vibration start! duration: %u, max dur: %u", dur, id(stable_duration));
-          if (dur > id(stable_duration)) {
-            id(stable_duration) = dur;
-            
-            // Cat weight is average of longest stable duration
-            if (id(cat_weight_count) > 0) {
-              id(current_cat_weight).publish_state(id(cat_weight_sum)/id(cat_weight_count));
-              ESP_LOGV("VBR", "Publishing cat state: %.2f", id(cat_weight_sum)/id(cat_weight_count));
-            }
-          }
-          id(cat_weight_sum) = 0;
-          id(cat_weight_count) = 0;
     on_release:
       - script.execute: event_timeout
-      - lambda: !lambda |-
-          ESP_LOGV("VBR", "Vibration end! eventStart: %lu", id(event_start));
-          if (id(event_start) == 0) {
-            return;
-          }
-          id(stable_start) = id(homeassistant_time).now().timestamp;
 
   - platform: template
     device_class: occupancy
@@ -656,8 +627,6 @@ binary_sensor:
     filters:
       - delayed_on:
           seconds: 2
-    on_press:
-      - lambda: !lambda id(is_cat_event) = true;
 
 button:
   - platform: template
@@ -705,10 +674,6 @@ script:
           id(auto_tare_value) = 0;
           id(is_cat_event) = false;
           id(event_start) = 0;
-          id(stable_start) = 0;
-          id(stable_duration) = 0;
-          id(cat_weight_count) = 0;
-          id(cat_weight_sum) = 0;
   # Begin a countdown for event timeout
   - id: event_timeout
     mode: restart
