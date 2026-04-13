@@ -20,42 +20,26 @@ cat visits, waste, and litter status using load cells.
 
 ## How to Use
 
-Shared logic lives in [`litterbox-monitor.yaml`](litterbox-monitor.yaml) (the **template**). It does not include API encryption, OTA, or WiFi credentials so you can reuse it for multiple devices. **Compile and flash using a thin device YAML** that includes the template and supplies secrets (see below).
-
-### Device YAML (template + install)
-
-Use [`litterbox-install.example.yaml`](litterbox-install.example.yaml) as your starting point: copy it to a file you will actually build (for example `litterbox.yaml`), set `substitutions` (`name`, `friendly_name`, `cats`, `timezone`, or tuning keys—same keys as in the template), and wire API, OTA, and WiFi with the `!secret` entries shown there. Ensure your `secrets.yaml` defines `litterbox_api_key`, `litterbox_ota_password`, `litterbox_ap_password`, `wifi_ssid`, and `wifi_password`.
-
-The example uses a local `!include` for [`litterbox-monitor.yaml`](litterbox-monitor.yaml). With a local copy, keep [`state_analyzer.h`](state_analyzer.h) in the same directory; the template includes it via `esphome.includes`, so copying only the YAML is not enough (clone the repo or copy both files). 
-
-If you prefer to pull the template from GitHub instead, replace that `packages` entry with:
-
-```yaml
-packages:
-  - litterbox_monitor: github://cristianchelu/esphome-litterbox-monitor/litterbox-monitor.yaml@main
-```
-
-See the [ESPHome packages](https://esphome.io/components/packages/) docs for other package forms, including auto-updating rules.
-
-Run ESPHome against **your device file**, not the template.
-
-For a second litterbox, add another YAML file with a different `name` / `friendly_name` and its own secrets (typically a separate config directory with its own `secrets.yaml`).
-
 ### Hardware Setup
 
-Update [`litterbox-monitor.yaml`](litterbox-monitor.yaml) with the correct GPIO pins for your HX711,
+Update the configuration with the correct GPIO pins for your HX711,
 as you have wired it to your ESP32.
 
-Change the timezone substitution in the template or override `timezone` in your thin device YAML.
+Change the timezone substitution to your local timezone.
+
+Ensure your `secrets.yaml` defines `litterbox_api_key`, `litterbox_ota_password`,
+`litterbox_ap_password`, `wifi_ssid`, and `wifi_password`.
+
+Both [`litterbox-monitor.yaml`](litterbox-monitor.yaml) and [`state_analyzer.h`](state_analyzer.h) must be in the same directory (clone the repo or copy both files).
 
 ### Configuring Cats
 
 This configuration supports 1-5 cats out of the box. The example substitutions 
 shows two cats, but you should configure this before first flashing:
 
-- Set the `cats` substitution in your thin device YAML (see [`litterbox-install.example.yaml`](litterbox-install.example.yaml)) with your 
+- Update the `cats` substitution in the YAML configuration to include your 
   cat names (e.g., "Fluffy", "Whiskers", "Mittens"). Add or remove from the list
-  as needed. You do not need to edit [`litterbox-monitor.yaml`](litterbox-monitor.yaml) for this.
+  as needed.
 - Only the cats you define will have corresponding weight and daily visit 
   sensors available in Home Assistant.
 - After flashing, use the `set_cat_weight` API service to set the weight 

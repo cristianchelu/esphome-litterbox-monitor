@@ -2,10 +2,6 @@ substitutions:
   ## Configuration parameters
   ## Modify these to suit your setup
 
-  # Device identity (override in a thin device YAML when using packages)
-  name: litterbox
-  friendly_name: "Litterbox"
-
   # Cat names to be shown in the Home Assistant UI
   # Enables the corresponding cat sensors.
   # Add or remove up to 5 cats as needed.
@@ -127,8 +123,8 @@ globals:
     restore_value: True
 
 esphome:
-  name: ${name}
-  friendly_name: ${friendly_name}
+  name: litterbox
+  friendly_name: Litterbox
   comment: Smart Litterbox
   includes:
     - state_analyzer.h
@@ -145,6 +141,8 @@ logger:
   level: INFO
 
 api:
+  encryption:
+    key: !secret litterbox_api_key
   services:
     - service: set_cat_weight
       variables:
@@ -169,9 +167,15 @@ api:
             known_weight_kg: !lambda return known_weight_kg;
 
 ota:
+  - platform: esphome
+    password: !secret litterbox_ota_password
 
 wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
   ap:
+    ssid: "Litterbox Fallback Hotspot"
+    password: !secret litterbox_ap_password
 
 captive_portal:
 
