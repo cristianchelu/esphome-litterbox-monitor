@@ -61,8 +61,8 @@ EMPTY --> ENTERING --> OCCUPIED <--> ELIMINATING
 | **ELIMINATING** | Weight is stable and close to a known cat value. The cat is sitting still -- likely doing its business. |
 | **GAP** | Weight dropped below threshold briefly (repositioning, partial step-off). If weight returns, the session resumes; if the gap times out, the session ends. |
 
-The transition from `OCCUPIED` to `ELIMINATING` is gated by a rolling standard
-deviation check over a 1-second window (is the cat holding reasonably
+The transition from `OCCUPIED` to `ELIMINATING` is gated by a rolling variance
+check over a 1-second window (is the cat holding reasonably
 still?), combined with the weight being within 10% of a known cat.
 When the cat starts moving again, it drops back to `OCCUPIED`.
 
@@ -80,7 +80,7 @@ When activity ends, the raw state timeline goes through cleanup:
    `OCCUPIED` -- too brief to be a real elimination event.
 3. **Collapse**: Consecutive periods of the same state get merged.
 
-### Variance Calculation
+### Standard Deviation Calculation
 
 For each surviving `ELIMINATING` period, the population standard deviation of
 the raw weight samples is computed.  The first and last 10 samples (~1 s
@@ -97,8 +97,10 @@ getting up.
 | Two periods, one below and one above | `both` |
 | Anything else | `unknown` |
 
-The 4 g threshold (`SA_URINATION_VARIANCE_THRESHOLD_G`) is the only tunable
-for classification, and in practice it separates the two behaviors cleanly.
+The 4 g threshold (`SA_URINATION_STD_DEV_THRESHOLD_G`, `"Classification Threshold"`) 
+is the only tunable for classification, and in practice it separates 
+the two behaviors cleanly.
+
 
 ## Cat Identification
 
@@ -116,6 +118,22 @@ via a webcam pointed at the litterbox.  Not a huge sample, but enough to
 tune the heuristics with confidence that no events were missed or
 mislabeled.
 
+Plotting every tagged event by its elimination-phase standard deviation
+tells the story pretty clearly -- urination clusters low, defecation
+sits higher, and the gap between the two is real if not enormous.
+
+![elimination variance by tagged waste type](plot.png)
+
+Two representative visits show what the state machine actually sees.
+Weight signal and rolling variance are overlaid with the state timeline
+-- you can see the `ELIMINATING` window land right where the cat holds
+still, with variance near zero for urination and visibly elevated for
+defecation.
+
+| Urination | Defecation |
+| --- | --- |
+| ![Example visit classified as urination](event-example-urination.png) | ![Example visit classified as defecation](event-example-defecation.png) |
+
 ## Known Limitations
 
 - **Cats of similar weight** (within ~10%) can't be reliably distinguished.
@@ -131,10 +149,10 @@ mislabeled.
   to freeze and surveil mid-visit, expect occasional phantom urination
   events.
 
-- **Diarrhea reads as urination.**  The variance signal relies on the
-  muscular effort of normal defecation.  Loose stool passes without those
-  characteristic micro-movements, so the scale sees a smooth, low-variance
-  elimination indistinguishable from urination.  This is worth keeping in
+- **Diarrhea reads as urination.**  The variance signal depends on the
+  physical effort of normal defecation -- the cat braces and shifts, and
+  the scale picks that up.  Loose stool passes without any of that, so
+  the reading looks identical to urination.  This is worth keeping in
   mind if you're monitoring a cat with GI issues -- the data will
   under-report defecation during flare-ups.
 
@@ -150,6 +168,48 @@ mislabeled.
   (e.g. a few grams of urine during a UTI bout) fall below the noise
   floor and go undetected.  This is a hardware limitation, not a software
   one.
+
+
+## Load Cell Selection
+
+PoopSense only works as well as the underlying weight signal.  If the
+load cell plus ADC combination is too coarse, the classifier can't see
+the difference it's looking for.
+
+The decision gap is narrow.  In practice:
+
+- Urination lands around **1-3.5 g** standard deviation
+- Defecation lands around **4-10 g**
+- The cutoff sits at **4 g**
+
+That's roughly **0.5 g** of daylight between a noisy urination event
+and the defecation threshold.  If quantization eats into that margin,
+near-threshold events become coin flips.  Rule of thumb:
+
+- **<= 0.25 g/count**: plenty of room
+- **0.25-0.5 g/count**: workable, tighter on edge cases
+- **> 0.5 g/count**: too coarse -- the classifier starts guessing
+
+### Resolution Table
+
+For common 4-cell bridge configurations. **g/count** values below are
+**ballparks** (typical cheap cells, HX711 gain 128, real-world
+usable 20-bit resolution):
+
+| Cell Rating | g/count @ 3.3V | Verdict @ 3.3V | g/count @ 5V | Verdict @ 5V |
+|---|---|---|---|---|
+| 4× 5kg = 20kg | ~0.12 | ✅ | ~0.08 | ✅ |
+| 4× 8kg = 32kg | ~0.19 | ✅ | ~0.12 | ✅ |
+| 4× 10kg = 40kg | ~0.23 | ✅ | ~0.15 | ✅ |
+| 4× 12.5kg = 50kg | ~0.29 | ⚠️ borderline | ~0.19 | ✅ |
+| 4× 20kg = 100kg | ~0.58 | ❌ | ~0.38 | ⚠️ borderline |
+| 4× 50kg = 200kg | ~1.2 | ❌ | ~0.76 | ❌ |
+
+"Bigger load cells just to be safe" eventually works against you.
+Presence detection doesn't care about resolution, but waste-type
+classification does -- you need cells rated high enough to handle the
+cat, the litter, and the box, but not so high that the ADC can't
+resolve a few grams of variance.
 
 ## Future Work
 

@@ -332,7 +332,13 @@ sensor:
       - lambda: !lambda |-
           if (!id(activity_detected).state) return;
           float tared_g = (x - id(tare_value) - id(auto_tare_value)) * 1000.0f;
+          static AnalyzerState prev_state = AnalyzerState::EMPTY;
           get_analyzer().process_sample(tared_g, get_sample_idx());
+          AnalyzerState cur = get_analyzer().current_state();
+          if (cur != prev_state) {
+            id(state_machine_state).publish_state(analyzer_state_str(cur));
+            prev_state = cur;
+          }
           get_weight_buf().push(tared_g);
           get_sample_idx()++;
 
@@ -348,7 +354,7 @@ sensor:
       # only publish raw 10hz sensor value during events
       - lambda: !lambda |-
           if (id(activity_detected).state) {
-            return x;
+            return x - id(tare_value) - id(auto_tare_value);
           } else {
             return {};
           }
@@ -475,12 +481,27 @@ sensor:
     unit_of_measurement: "s"
     accuracy_decimals: 0
     update_interval: never
+  - platform: template
+    id: elimination_std_dev_sensor
+    name: "Elimination Std Dev"
+    icon: mdi:chart-bell-curve
+    entity_category: diagnostic
+    state_class: measurement
+    unit_of_measurement: "g"
+    accuracy_decimals: 1
+    update_interval: never
 
 text_sensor:
   - platform: template
     id: elimination_type_sensor
     name: "Elimination Type"
     icon: "mdi:toilet"
+    update_interval: never
+  - platform: template
+    id: state_machine_state
+    name: "State Machine"
+    icon: "mdi:state-machine"
+    entity_category: diagnostic
     update_interval: never
 
 number:
@@ -511,6 +532,19 @@ number:
     initial_value: "1000"
     entity_category: config
     restore_value: False
+  - platform: template
+    name: "Classification Threshold"
+    id: elimination_std_dev_threshold
+    icon: "mdi:chart-bell-curve"
+    unit_of_measurement: "g"
+    entity_category: config
+    optimistic: true
+    min_value: 1
+    max_value: 20
+    step: 0.1
+    mode: box
+    initial_value: "4"
+    restore_value: True
   - platform: template
     name: "Empty Box Weight"
     id: litterbox_weight
@@ -550,6 +584,7 @@ binary_sensor:
           id(event_start) = id(homeassistant_time).now().timestamp;
           get_analyzer().init(id(cat_weights), 5);
           get_weight_buf().reset();
+          get_analyzer().attach_buffer(&get_weight_buf());
           get_sample_idx() = 0;
           ESP_LOGD("SA", "Activity start, analyzer reset");
     on_release:
@@ -561,7 +596,8 @@ binary_sensor:
 
           if (duration >= 10 && samples >= 100) {
             StateResult result = get_analyzer().finalize(
-                get_weight_buf(), id(cat_weights), 5);
+                get_weight_buf(), id(cat_weights), 5,
+                id(elimination_std_dev_threshold).state);
 
             ESP_LOGI("SA", "Event: cat=%.0fg waste=%.0fg type=%s cat_idx=%d periods=%d dur=%ds",
                      result.cat_weight, result.waste_weight,
@@ -572,6 +608,17 @@ binary_sensor:
                 elimination_type_str(result.elimination_type));
             id(current_cat_weight).publish_state(result.cat_weight / 1000.0f);
             id(event_duration_sensor).publish_state(duration);
+
+            // Publish std dev of the single elimination period
+            if (result.period_count > 0) {
+              for (int i = 0; i < result.period_count; i++) {
+                if (result.periods[i].state == AnalyzerState::ELIMINATING &&
+                    result.periods[i].std_dev >= 0.0f) {
+                  id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
+                  break;
+                }
+              }
+            }
 
             if (result.detected_cat >= 0) {
               id(is_cat_event) = true;
@@ -593,6 +640,7 @@ binary_sensor:
           } else {
             ESP_LOGD("SA", "Short event skipped: %ds, %d samples", duration, samples);
           }
+          id(state_machine_state).publish_state("empty");
       - lambda: !lambda |- # Clean event detection
           if (id(is_cat_event)) {
             return;

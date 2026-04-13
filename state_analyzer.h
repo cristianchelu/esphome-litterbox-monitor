@@ -3,19 +3,21 @@
 #include <cstring>
 #include <algorithm>
 
-static const int SA_MAX_SAMPLES = 6000;
+static const int SA_MAX_SAMPLES = 36000;
 static const int SA_MAX_TRANSITIONS = 128;
 static const int SA_MAX_PERIODS = 64;
 static const int SA_MAX_CATS = 5;
-static const float SA_URINATION_VARIANCE_THRESHOLD_G = 4.0f;
+static const int SA_MAX_ZONES = 32;
+static const float SA_URINATION_STD_DEV_THRESHOLD_G = 4.0f;
+static const int16_t SA_SCALE_ABS = 1;    // 1g, identical to previous behavior
+static const int16_t SA_SCALE_DELTA = 10; // 0.1g, used during OCCUPIED/ELIMINATING
 
 enum class AnalyzerState : uint8_t {
   EMPTY,
   ENTERING,
   OCCUPIED,
   ELIMINATING,
-  GAP,
-  ENDED
+  GAP
 };
 
 enum class EliminationType : uint8_t {
@@ -30,7 +32,7 @@ struct StatePeriod {
   AnalyzerState state;
   int start;
   int end;
-  float variance;  // negative means undefined
+  float std_dev;  // negative means undefined
 };
 
 struct StateTransition {
@@ -46,6 +48,12 @@ struct StateResult {
   int period_count;
   EliminationType elimination_type;
   int detected_cat;  // 0-based index, -1 = unknown
+};
+
+struct ZoneEntry {
+  int start;         // first sample index in this zone
+  float baseline_g;  // 0.0 for absolute zones
+  int16_t scale;     // SA_SCALE_ABS or SA_SCALE_DELTA
 };
 
 // Ring buffer for rolling statistics over a fixed window
@@ -109,23 +117,50 @@ class Ring {
   int filled_;
 };
 
-// Stores raw weight samples for post-hoc per-period variance calculation
+// Stores raw weight samples for post-hoc per-period variance calculation.
+//
+// Samples are stored in one of two encodings, tracked via a zone table:
+//   Absolute zones (SA_SCALE_ABS=1):  int16_t(weight_g)          -- 1g precision
+//   Delta zones (SA_SCALE_DELTA=10):  int16_t((weight_g-base)*10) -- 0.1g precision
+//
+// Delta zones are opened at each OCCUPIED entry; absolute zones at GAP/ENTERING.
+// compute_std_dev() is only ever called on ELIMINATING windows, which always
+// fall inside a delta zone, so it unconditionally applies /SA_SCALE_DELTA.
 class WeightBuffer {
  public:
-  void reset() { count_ = 0; }
+  void reset() {
+    count_ = 0;
+    zone_count_ = 0;
+    current_zone_ = -1;
+    begin_absolute_zone();
+  }
+
+  // Open an absolute (1g) zone starting at the current sample position.
+  void begin_absolute_zone() {
+    if (zone_count_ < SA_MAX_ZONES)
+      zones_[current_zone_ = zone_count_++] = {count_, 0.0f, SA_SCALE_ABS};
+  }
+
+  // Open a delta (0.1g) zone with the given baseline starting at current position.
+  void begin_delta_zone(float baseline_g) {
+    if (zone_count_ < SA_MAX_ZONES)
+      zones_[current_zone_ = zone_count_++] = {count_, baseline_g, SA_SCALE_DELTA};
+  }
 
   void push(float weight_g) {
-    if (count_ < SA_MAX_SAMPLES) {
-      samples_[count_++] = static_cast<int16_t>(
-          std::max(-32768.0f, std::min(32767.0f, weight_g)));
-    }
+    if (count_ >= SA_MAX_SAMPLES || current_zone_ < 0) return;
+    const ZoneEntry &z = zones_[current_zone_];
+    float val = weight_g - z.baseline_g;
+    if (z.scale != SA_SCALE_ABS) val *= z.scale;
+    samples_[count_++] = static_cast<int16_t>(
+        std::max(-32768.0f, std::min(32767.0f, val)));
   }
 
   int count() const { return count_; }
-  int16_t operator[](int i) const { return samples_[i]; }
 
-  // Population std dev of weights in [start+buffer, end+1-buffer),
-  // matching the TS processEvent() per-period variance calculation.
+  // Population std dev of the ELIMINATING window [start+trim, end+1-trim).
+  // Always called on delta-encoded samples; divides result by SA_SCALE_DELTA
+  // to convert back to grams.
   float compute_std_dev(int start, int end) const {
     const int trim = 10;
     int s = start + trim;
@@ -144,12 +179,15 @@ class WeightBuffer {
       float d = samples_[i] - m;
       var_sum += d * d;
     }
-    return sqrtf(var_sum / n);
+    return sqrtf(var_sum / n) / SA_SCALE_DELTA;
   }
 
  private:
   int16_t samples_[SA_MAX_SAMPLES];
   int count_ = 0;
+  ZoneEntry zones_[SA_MAX_ZONES];
+  int zone_count_ = 0;
+  int current_zone_ = -1;
 };
 
 class StateAnalyzer {
@@ -165,14 +203,17 @@ class StateAnalyzer {
     reset();
   }
 
+  void attach_buffer(WeightBuffer *buf) { wbuf_ = buf; }
+
   void process_sample(float weight, int index) {
+    current_weight_g_ = weight;
     current_sample_ = index;
     window_.push(weight);
     weight_hist_.push(weight);
     float mean1s = window_.mean();
     mean_hist_.push(mean1s);
-    float var10 = sqrtf(weight_hist_.variance());
-    bool stable_now = var10 > 0.0f && var10 < VAR_STABLE;
+    float var10 = weight_hist_.variance();
+    bool stable_now = var10 > 0.0f && var10 < STABLE_VARIANCE;
 
     if (session_active_ &&
         current_sample_ - session_start_ > MAX_SESSION)
@@ -259,9 +300,6 @@ class StateAnalyzer {
           return;
         }
         break;
-
-      case AnalyzerState::ENDED:
-        return;
     }
   }
 
@@ -269,7 +307,8 @@ class StateAnalyzer {
   // Requires the WeightBuffer that was filled alongside process_sample calls.
   StateResult finalize(const WeightBuffer &buf,
                        const float *known_weights_kg,
-                       int num_cats) const {
+                       int num_cats,
+                       float std_dev_threshold = SA_URINATION_STD_DEV_THRESHOLD_G) const {
     StateResult r;
     r.cat_weight = cat_weight_ > 0.0f ? cat_weight_ : best_stable_w_;
     r.waste_weight = waste_weight_;
@@ -278,12 +317,12 @@ class StateAnalyzer {
     post_process(r.periods, r.period_count);
 
     for (int i = 0; i < r.period_count; i++) {
-      r.periods[i].variance =
+      r.periods[i].std_dev =
           buf.compute_std_dev(r.periods[i].start, r.periods[i].end);
     }
 
     r.elimination_type =
-        classify_elimination(r.periods, r.period_count);
+        classify_elimination(r.periods, r.period_count, std_dev_threshold);
 
     r.detected_cat =
         identify_cat(r.cat_weight, known_weights_kg, num_cats);
@@ -311,14 +350,14 @@ class StateAnalyzer {
 
  private:
   static constexpr int HZ = 10;
-  static constexpr float VAR_STABLE = 15.8113883f;  // sqrt(250)
+  static constexpr float STABLE_VARIANCE = 250.0f; // ~15g std dev
   static constexpr float STABLE_MERGE_GAP = 1.5f * HZ;
   static constexpr float ENTRY_DELTA_MIN = 1200.0f;
   static constexpr float ENTRY_DELTA_FRAC = 0.22f;
   static constexpr float PRESENCE_FRAC = 0.28f;
   static constexpr int EXIT_HOLD = 6;
   static constexpr int REENTRY_WIN = 15 * HZ;
-  static constexpr int MAX_SESSION = 10 * 60 * HZ;
+  static constexpr int MAX_SESSION = 60 * 60 * HZ;
   static constexpr float KNOWN_TOL = 0.1f;
   static constexpr int WINDOW = 10;
 
@@ -338,6 +377,8 @@ class StateAnalyzer {
   float cat_weight_ = 0.0f;
   float best_stable_w_ = 0.0f;
   int best_stable_dur_ = 0;
+  float current_weight_g_ = 0.0f;
+  WeightBuffer *wbuf_ = nullptr;
   StateTransition txs_[SA_MAX_TRANSITIONS];
   int tx_count_ = 0;
 
@@ -369,6 +410,15 @@ class StateAnalyzer {
     }
     if (tx_count_ < SA_MAX_TRANSITIONS)
       txs_[tx_count_++] = {state_, ns, current_sample_ - offset};
+    if (wbuf_) {
+      if (ns == AnalyzerState::OCCUPIED && state_ != AnalyzerState::ELIMINATING) {
+        wbuf_->begin_delta_zone(current_weight_g_);
+      } else if ((ns == AnalyzerState::GAP || ns == AnalyzerState::ENTERING) &&
+                 (state_ == AnalyzerState::OCCUPIED ||
+                  state_ == AnalyzerState::ELIMINATING)) {
+        wbuf_->begin_absolute_zone();
+      }
+    }
     state_ = ns;
   }
 
@@ -448,24 +498,23 @@ class StateAnalyzer {
   }
 
   static EliminationType classify_elimination(const StatePeriod *p,
-                                              int count) {
+                                              int count,
+                                              float threshold) {
     StatePeriod elim[SA_MAX_PERIODS];
     int ec = 0;
     for (int i = 0; i < count; i++) {
-      if (p[i].state == AnalyzerState::ELIMINATING && p[i].variance >= 0.0f)
+      if (p[i].state == AnalyzerState::ELIMINATING && p[i].std_dev >= 0.0f)
         elim[ec++] = p[i];
     }
 
     if (ec == 0) return EliminationType::NO_ELIMINATION;
     if (ec == 1)
-      return elim[0].variance < SA_URINATION_VARIANCE_THRESHOLD_G
+      return elim[0].std_dev < threshold
                  ? EliminationType::URINATION
                  : EliminationType::DEFECATION;
     if (ec == 2) {
-      bool a_uri =
-          elim[0].variance < SA_URINATION_VARIANCE_THRESHOLD_G;
-      bool b_uri =
-          elim[1].variance < SA_URINATION_VARIANCE_THRESHOLD_G;
+      bool a_uri = elim[0].std_dev < threshold;
+      bool b_uri = elim[1].std_dev < threshold;
       if (a_uri != b_uri) return EliminationType::BOTH;
     }
     return EliminationType::UNKNOWN;
@@ -502,6 +551,17 @@ inline WeightBuffer &get_weight_buf() {
 inline int &get_sample_idx() {
   static int idx = 0;
   return idx;
+}
+
+inline const char *analyzer_state_str(AnalyzerState s) {
+  switch (s) {
+    case AnalyzerState::EMPTY:       return "empty";
+    case AnalyzerState::ENTERING:    return "entering";
+    case AnalyzerState::OCCUPIED:    return "occupied";
+    case AnalyzerState::ELIMINATING: return "eliminating";
+    case AnalyzerState::GAP:         return "gap";
+  }
+  return "unknown";
 }
 
 inline const char *elimination_type_str(EliminationType t) {

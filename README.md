@@ -8,7 +8,7 @@ cat visits, waste, and litter status using load cells.
 ## Features
 
 - **Weight tracking:** Measures total litterbox weight and detects changes.
-- ***PoopSense* waste recognition:** Recognizes #1 from #2. [How it works ->](POOPSENSE.md)
+- ***PoopSense* waste recognition:** Recognizes #1 from #2. [How it works ->](docs/POOPSENSE.md)
 - **Multiple cat detection:** Identifies cats by weight (supports 1-5 cats).
 - **Waste weight tracking:** Tracks total accumulated waste after each visit.
 - **Remaining litter tracking:** Calculates remaining litter after clean events.
@@ -104,6 +104,8 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 ## Hardware
 
+Follow this great [SparkFun HX711 Hookup Guide](https://learn.sparkfun.com/tutorials/load-cell-amplifier-hx711-breakout-hookup-guide/all) for assembly instructions.
+
 ### Load Cell Amplifier
 
 - Any HX711 breakout board will work, BUT:
@@ -115,10 +117,16 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 ### Load Cells
 
-- 4 × 5-10kg strain gauge load cells (commonly available on AliExpress).
+- 4× 5-10kg strain gauge load cells (commonly available on AliExpress).
 - Choose the load cell capacity based on:
-  - Baseboard + litterbox + litter + heaviest cat + jumping force + safety buffer, divided by 4.
+  - Baseboard + litterbox + litter + (heaviest cat × 2 for jump impact) × 1.5 safety margin.
+  - Example: normal setup (average cat): (1 kg baseboard + 0.5 kg box + 2.5 kg litter + 5 kg cat × 2) × 1.5 = **21 kg** -> 24~32 kg cells (4× 6~8kg)
+  - Example: XL setup (large cat): (1.5 kg box + 5 kg litter + 10 kg cat × 2) × 1.5 = **39.75 kg** -> 40 kg cells (4× 10kg)
+- For normal weight tracking and occupancy detection, any sensibly sized load cell set will work.
 - Higher capacity load cells reduce measurement resolution.
+- For PoopSense event-type classification, see the
+  [detailed load cell selection table](docs/POOPSENSE.md#resolution-table).
+
 
 ### ESP32
 
@@ -156,6 +164,7 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 ## Number Entities
 
 - **Litter Change Interval:** Configure the number of days between deep clean reminders (7-30 days, default: 30).
+- **Classification Threshold:** Standard deviation threshold (in grams) that separates urination from defecation. The default of 4 g works well out of the box; raise it if defecation events are being over-reported, lower it if they're being missed.  See [PoopSense](docs/POOPSENSE.md) for details.
 - **Calibration Known Weight:** Weight of calibration objects used during scale setup.
 - **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations.
 
@@ -170,7 +179,7 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 - [x] Runtime assisted calibration.
 - [x] Easier adding/removing of pets.
-- [x] Distinguish urination/defecation/no-waste events ([PoopSense](POOPSENSE.md)).
+- [x] Distinguish urination/defecation/no-waste events.
 - [ ] Automatic periodic calibration using the empty litterbox weight.
 - [ ] Calculate trends and alert for outliers.
 - [ ] Distinguish cats of similar weight.
