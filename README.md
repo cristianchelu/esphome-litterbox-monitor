@@ -8,7 +8,7 @@ cat visits, waste, and litter status using load cells.
 ## Features
 
 - **Weight tracking:** Measures total litterbox weight and detects changes.
-- ***PoopSense* waste recognition:** Recognizes #1 from #2.
+- ***PoopSense* waste recognition:** Recognizes #1 from #2. [How it works ->](POOPSENSE.md)
 - **Multiple cat detection:** Identifies cats by weight (supports 1-5 cats).
 - **Waste weight tracking:** Tracks total accumulated waste after each visit.
 - **Remaining litter tracking:** Calculates remaining litter after clean events.
@@ -170,7 +170,7 @@ When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` ac
 
 - [x] Runtime assisted calibration.
 - [x] Easier adding/removing of pets.
-- [x] Distinguish urination/defecation/no-waste events (PoopSense).
+- [x] Distinguish urination/defecation/no-waste events ([PoopSense](POOPSENSE.md)).
 - [ ] Automatic periodic calibration using the empty litterbox weight.
 - [ ] Calculate trends and alert for outliers.
 - [ ] Distinguish cats of similar weight.
