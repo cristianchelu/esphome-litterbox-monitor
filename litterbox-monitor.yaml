@@ -61,6 +61,16 @@ globals:
     type: int[5] # count
     initial_value: "{0, 0, 0, 0, 0}"
     restore_value: True
+  # Daily pees per cat
+  - id: cat_daily_pees
+    type: int[5] # count
+    initial_value: "{0, 0, 0, 0, 0}"
+    restore_value: True
+  # Daily poops per cat
+  - id: cat_daily_poops
+    type: int[5] # count
+    initial_value: "{0, 0, 0, 0, 0}"
+    restore_value: True
   # Timestamp of last litter change
   - id: litter_changed_date
     type: time_t
@@ -191,6 +201,8 @@ time:
           - lambda: !lambda |-
               for (int i = 0; i < 5; i++) {
                 id(cat_daily_visits)[i] = 0;
+                id(cat_daily_pees)[i] = 0;
+                id(cat_daily_poops)[i] = 0;
               }
 
 sensor:
@@ -293,6 +305,96 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
     lambda: !lambda return id(cat_daily_visits)[4];
+    internal: ${cats|length <= 4 or cats[4] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[0]} Daily Pee"
+    id: cat1_daily_pees_sensor
+    icon: "mdi:water"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_pees)[0];
+    internal: False
+    update_interval: 1s
+  - platform: template
+    name: "${cats[1]} Daily Pee"
+    id: cat2_daily_pees_sensor
+    icon: "mdi:water"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_pees)[1];
+    internal: ${cats|length <= 1 or cats[1] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[2]} Daily Pee"
+    id: cat3_daily_pees_sensor
+    icon: "mdi:water"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_pees)[2];
+    internal: ${cats|length <= 2 or cats[2] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[3]} Daily Pee"
+    id: cat4_daily_pees_sensor
+    icon: "mdi:water"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_pees)[3];
+    internal: ${cats|length <= 3 or cats[3] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[4]} Daily Pee"
+    id: cat5_daily_pees_sensor
+    icon: "mdi:water"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_pees)[4];
+    internal: ${cats|length <= 4 or cats[4] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[0]} Daily Poops"
+    id: cat1_daily_poops_sensor
+    icon: "mdi:emoticon-poop"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_poops)[0];
+    internal: False
+    update_interval: 1s
+  - platform: template
+    name: "${cats[1]} Daily Poops"
+    id: cat2_daily_poops_sensor
+    icon: "mdi:emoticon-poop"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_poops)[1];
+    internal: ${cats|length <= 1 or cats[1] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[2]} Daily Poops"
+    id: cat3_daily_poops_sensor
+    icon: "mdi:emoticon-poop"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_poops)[2];
+    internal: ${cats|length <= 2 or cats[2] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[3]} Daily Poops"
+    id: cat4_daily_poops_sensor
+    icon: "mdi:emoticon-poop"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_poops)[3];
+    internal: ${cats|length <= 3 or cats[3] == ""}
+    update_interval: 1s
+  - platform: template
+    name: "${cats[4]} Daily Poops"
+    id: cat5_daily_poops_sensor
+    icon: "mdi:emoticon-poop"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda return id(cat_daily_poops)[4];
     internal: ${cats|length <= 4 or cats[4] == ""}
     update_interval: 1s
 
@@ -627,6 +729,14 @@ binary_sensor:
                 id(cat_weights)[ci] = result.cat_weight / 1000.0f;
               }
               id(cat_daily_visits)[ci]++;
+              if (result.elimination_type == EliminationType::URINATION ||
+                  result.elimination_type == EliminationType::BOTH) {
+                id(cat_daily_pees)[ci]++;
+              }
+              if (result.elimination_type == EliminationType::DEFECATION ||
+                  result.elimination_type == EliminationType::BOTH) {
+                id(cat_daily_poops)[ci]++;
+              }
               ESP_LOGI("CAT", "Cat %d: %.2fkg, daily visits: %d",
                        ci + 1, id(cat_weights)[ci], id(cat_daily_visits)[ci]);
             }
