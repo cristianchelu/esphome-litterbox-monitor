@@ -82,30 +82,6 @@ globals:
     initial_value: "0"
     restore_value: False
   
-  # Current longest stable duration start timestamp
-  - id: stable_start
-    type: time_t
-    initial_value: "0"
-    restore_value: False
-  
-  # Longest stable duration during the event
-  - id: stable_duration
-    type: uint8_t # seconds
-    initial_value: "0"
-    restore_value: False
-  
-  # Sum of weight readings during current stable period
-  - id: cat_weight_sum
-    type: float
-    initial_value: "0.0"
-    restore_value: False
-
-  # Count of weight readings during current stable period
-  - id: cat_weight_count
-    type: int
-    initial_value: "0"
-    restore_value: False
-
   
   ## Scale calibration parameters
   
@@ -150,6 +126,8 @@ esphome:
   name: litterbox
   friendly_name: Litterbox
   comment: Smart Litterbox
+  includes:
+    - state_analyzer.h
   project:
     name: "CristianChelu.LitterboxMonitor"
     version: "esp32.hx711"
@@ -350,6 +328,19 @@ sensor:
             prev_value = x;
             return {};
           }
+    on_value:
+      - lambda: !lambda |-
+          if (!id(activity_detected).state) return;
+          float tared_g = (x - id(tare_value) - id(auto_tare_value)) * 1000.0f;
+          static AnalyzerState prev_state = AnalyzerState::EMPTY;
+          get_analyzer().process_sample(tared_g, get_sample_idx());
+          AnalyzerState cur = get_analyzer().current_state();
+          if (cur != prev_state) {
+            id(state_machine_state).publish_state(analyzer_state_str(cur));
+            prev_state = cur;
+          }
+          get_weight_buf().push(tared_g);
+          get_sample_idx()++;
 
   - platform: copy
     id: hx711_unfiltered_value
@@ -363,7 +354,7 @@ sensor:
       # only publish raw 10hz sensor value during events
       - lambda: !lambda |-
           if (id(activity_detected).state) {
-            return x;
+            return x - id(tare_value) - id(auto_tare_value);
           } else {
             return {};
           }
@@ -429,11 +420,6 @@ sensor:
             }
           }
           id(cat_detected).publish_state(false);
-      - lambda: !lambda |- # Average stable cat weight
-          if (id(cat_detected).state == true && id(vibration_detected).state == false) {
-            id(cat_weight_count) = id(cat_weight_count) + 1;
-            id(cat_weight_sum) = id(cat_weight_sum) + id(weight_value).state;
-          }
   - platform: template
     unit_of_measurement: g
     name: "Waste Weight"
@@ -486,6 +472,37 @@ sensor:
     lambda: !lambda |-
       time_t timestamp = id(calibration_timestamp);
       return timestamp == 0 ? NAN : timestamp;
+  - platform: template
+    id: event_duration_sensor
+    name: "Event Duration"
+    icon: mdi:timer-outline
+    device_class: duration
+    state_class: measurement
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    id: elimination_std_dev_sensor
+    name: "Elimination Std Dev"
+    icon: mdi:chart-bell-curve
+    entity_category: diagnostic
+    state_class: measurement
+    unit_of_measurement: "g"
+    accuracy_decimals: 1
+    update_interval: never
+
+text_sensor:
+  - platform: template
+    id: elimination_type_sensor
+    name: "Elimination Type"
+    icon: "mdi:toilet"
+    update_interval: never
+  - platform: template
+    id: state_machine_state
+    name: "State Machine"
+    icon: "mdi:state-machine"
+    entity_category: diagnostic
+    update_interval: never
 
 number:
   # Interval in days after which the litter should be changed.
@@ -515,6 +532,19 @@ number:
     initial_value: "1000"
     entity_category: config
     restore_value: False
+  - platform: template
+    name: "Classification Threshold"
+    id: elimination_std_dev_threshold
+    icon: "mdi:chart-bell-curve"
+    unit_of_measurement: "g"
+    entity_category: config
+    optimistic: true
+    min_value: 1
+    max_value: 20
+    step: 0.1
+    mode: box
+    initial_value: "4"
+    restore_value: True
   - platform: template
     name: "Empty Box Weight"
     id: litterbox_weight
@@ -551,60 +581,77 @@ binary_sensor:
           seconds: ${activity_off_delay}
     on_press:
       - lambda: !lambda |-
-          id(event_start) = id(homeassistant_time).now().timestamp; 
-          ESP_LOGV("ACT", "Activity start! %lu", id(event_start));
+          id(event_start) = id(homeassistant_time).now().timestamp;
+          get_analyzer().init(id(cat_weights), 5);
+          get_weight_buf().reset();
+          get_analyzer().attach_buffer(&get_weight_buf());
+          get_sample_idx() = 0;
+          ESP_LOGD("SA", "Activity start, analyzer reset");
     on_release:
-      - lambda: !lambda |- # Set cat event data
-          // TODO: Revisit logic.
-          // Figure out how to distinguish between cat playing nearby
-          // and cat actually using the litterbox to add a visit correctly.
-          // This might not be necessary because if a cat attempts to use
-          // the litterbox (i.e. crouch and stay still), the vibration 
-          // sensor would trigger a stable weight reading.
+      - lambda: !lambda |-
+          time_t now = id(homeassistant_time).now().timestamp;
+          int duration = now - id(event_start);
+          int samples = get_sample_idx();
+          id(is_cat_event) = false;
 
-          // Update cat weight if stable enough
-          auto detected_weight = id(current_cat_weight).state;
-          if (detected_weight > 0.0) {
-            for (int i = 0; i < 5; i++) {
-              auto cat_weight = id(cat_weights)[i];
+          if (duration >= 10 && samples >= 100) {
+            StateResult result = get_analyzer().finalize(
+                get_weight_buf(), id(cat_weights), 5,
+                id(elimination_std_dev_threshold).state);
 
-              if (cat_weight == 0.0) {
-                continue;
-              }
+            ESP_LOGI("SA", "Event: cat=%.0fg waste=%.0fg type=%s cat_idx=%d periods=%d dur=%ds",
+                     result.cat_weight, result.waste_weight,
+                     elimination_type_str(result.elimination_type),
+                     result.detected_cat, result.period_count, duration);
 
-              if (abs(detected_weight - cat_weight) / cat_weight < 0.1) {
-                id(cat_weights)[i] = detected_weight;
-                id(cat_daily_visits)[i] = id(cat_daily_visits)[i] + 1;
-                ESP_LOGI("CAT", "Updated weight for cat %d: %.2f kg", i + 1, detected_weight);
-                ESP_LOGI("CAT", "Cat %d daily visits: %d", i + 1, id(cat_daily_visits)[i]);
-                break;
+            id(elimination_type_sensor).publish_state(
+                elimination_type_str(result.elimination_type));
+            id(current_cat_weight).publish_state(result.cat_weight / 1000.0f);
+            id(event_duration_sensor).publish_state(duration);
+
+            // Publish std dev of the single elimination period
+            if (result.period_count > 0) {
+              for (int i = 0; i < result.period_count; i++) {
+                if (result.periods[i].state == AnalyzerState::ELIMINATING &&
+                    result.periods[i].std_dev >= 0.0f) {
+                  id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
+                  break;
+                }
               }
             }
 
-            // Add to total waste in litterbox if the cat was stable enough to leave something
-            auto new_waste = id(weight_value).state;
-            id(waste_weight).publish_state(id(waste_weight).state + max(new_waste * 1000, 0.0f));
-          }
+            if (result.detected_cat >= 0) {
+              id(is_cat_event) = true;
+              int ci = result.detected_cat;
+              if (result.cat_weight > 0.0f) {
+                id(cat_weights)[ci] = result.cat_weight / 1000.0f;
+              }
+              id(cat_daily_visits)[ci]++;
+              ESP_LOGI("CAT", "Cat %d: %.2fkg, daily visits: %d",
+                       ci + 1, id(cat_weights)[ci], id(cat_daily_visits)[ci]);
+            }
 
-          if (id(is_cat_event)) {
-            // Add a visit even if the cat left nothing
+            float new_waste = id(weight_value).state;
+            if (new_waste > 0.0f) {
+              id(waste_weight).publish_state(
+                  id(waste_weight).state + new_waste * 1000.0f);
+            }
             id(visits).publish_state(id(visits).state + 1);
+          } else {
+            ESP_LOGD("SA", "Short event skipped: %ds, %d samples", duration, samples);
           }
-      - lambda: !lambda |- # Set clean event data
+          id(state_machine_state).publish_state("empty");
+      - lambda: !lambda |- # Clean event detection
           if (id(is_cat_event)) {
             return;
           }
           auto now = id(homeassistant_time).now().timestamp;
           if (now - id(event_start) < ${min_clean_event_duration}) {
-            // ignore bumps
-            // TODO: Figure out from vibration pattern what makes a clean event
             return;
           }
-
-          if (id(weight_value).state > ${min_clean_event_weight} / 1000) {
-            return; // -10g treshold for scooping
+          if (id(weight_value).state > ${min_clean_event_weight} / 1000.0f) {
+            return;
           }
-
           id(litter_weight).publish_state(id(hx711_raw_value).state - (id(litterbox_weight).state/1000.0));
           id(waste_weight).publish_state(0.0);
           id(visits).publish_state(0);
@@ -620,32 +667,8 @@ binary_sensor:
           seconds: ${vibration_off_delay}
     on_press:
       - script.stop: event_timeout
-      - lambda: !lambda |- # Longest stable duration
-          if (id(is_cat_event) == false) {
-            return;
-          }
-          time_t now = id(homeassistant_time).now().timestamp;
-          uint8_t dur = now - id(stable_start) + ${vibration_off_delay};
-          ESP_LOGV("VBR", "Vibration start! duration: %u, max dur: %u", dur, id(stable_duration));
-          if (dur > id(stable_duration)) {
-            id(stable_duration) = dur;
-            
-            // Cat weight is average of longest stable duration
-            if (id(cat_weight_count) > 0) {
-              id(current_cat_weight).publish_state(id(cat_weight_sum)/id(cat_weight_count));
-              ESP_LOGV("VBR", "Publishing cat state: %.2f", id(cat_weight_sum)/id(cat_weight_count));
-            }
-          }
-          id(cat_weight_sum) = 0;
-          id(cat_weight_count) = 0;
     on_release:
       - script.execute: event_timeout
-      - lambda: !lambda |-
-          ESP_LOGV("VBR", "Vibration end! eventStart: %lu", id(event_start));
-          if (id(event_start) == 0) {
-            return;
-          }
-          id(stable_start) = id(homeassistant_time).now().timestamp;
 
   - platform: template
     device_class: occupancy
@@ -656,8 +679,6 @@ binary_sensor:
     filters:
       - delayed_on:
           seconds: 2
-    on_press:
-      - lambda: !lambda id(is_cat_event) = true;
 
 button:
   - platform: template
@@ -705,10 +726,6 @@ script:
           id(auto_tare_value) = 0;
           id(is_cat_event) = false;
           id(event_start) = 0;
-          id(stable_start) = 0;
-          id(stable_duration) = 0;
-          id(cat_weight_count) = 0;
-          id(cat_weight_sum) = 0;
   # Begin a countdown for event timeout
   - id: event_timeout
     mode: restart
