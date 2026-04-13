@@ -14,7 +14,7 @@ cat visits, waste, and litter status using load cells.
 - **Remaining litter tracking:** Calculates remaining litter after clean events.
 - **Deep clean / replace litter reminder:** Notifies when it's time to change litter (configurable interval).
 - **Clean event detection:** Detects and resets waste/litter counters after removing waste.
-- **Visit counting:** Total visits since clean plus per-cat daily visits.
+- **Visit counting:** Total visits since clean plus per-cat daily visits, pees, and poos.
 - **Automatic tare:** Maintains accurate zeroing of the scale.
 - **Home Assistant integration:** All sensors and actions are available in Home Assistant.
 
@@ -144,6 +144,8 @@ Follow this great [SparkFun HX711 Hookup Guide](https://learn.sparkfun.com/tutor
 - **Cat 1-5 Weight:** Last weight stored for each cat when PoopSense identifies
   them on a visit (only enabled cats are visible).
 - **Cat 1-5 Daily Visits:** Number of visits per day for each cat (only enabled cats are visible).
+- **Cat 1-5 Daily Pee:** Number of urination events today for each cat (only enabled cats are visible).
+- **Cat 1-5 Daily Poops:** Number of defecation events today for each cat (only enabled cats are visible).
 - **Elimination Type:** Text sensor reporting `no_elimination`,
   `urination`, `defecation`, `both`, or `unknown` after each analyzed activity.
 - **Event Duration:** Seconds for the activity window that was analyzed (updated
