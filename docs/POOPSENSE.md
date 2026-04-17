@@ -102,13 +102,32 @@ is the only tunable for classification, and in practice it separates
 the two behaviors cleanly.
 
 
-## Cat Identification
+## Cat Identification & Weight
 
-As a bonus, the same state machine also identifies *which* cat visited.
-During `ELIMINATING` periods, the stable weight reading is an excellent
-proxy for body weight.  PoopSense tracks the longest-duration stable
-reading, applies an exponential moving average, and matches it against
-known cat weights within a 10% tolerance window.  Closest match wins.
+Cat identification and cat weight measurement are two different problems.
+They use different data, tolerate different amounts of noise, and fail in
+different ways -- so they're solved separately.
+
+### Identity
+
+Identity is a majority-vote across the entire visit.  Every sample in
+`OCCUPIED` or `ELIMINATING` is matched against configured cat profiles
+(same 10% band used elsewhere).  The cat with the most matching samples
+wins the attribution; if no profile was ever in range, the visit stays
+unattributed.
+
+### Visit Weight
+
+Visit weight only considers stable `ELIMINATING` samples, for the same
+reason a kitchen scale has a stability indicator: if the load is still
+moving, the number isn't meaningful yet.  Samples where the cat is
+shifting, digging, or repositioning stay within the 10% identity band
+and count toward the vote, but folding them into a weight average
+degrades the figure over time.
+
+Of the qualifying stable periods, the longest continuous stretch is
+selected and its mean reported.  This is computed independently of the
+identity vote.
 
 ## Validation
 

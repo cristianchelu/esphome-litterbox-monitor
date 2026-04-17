@@ -1,7 +1,8 @@
 #pragma once
-#include <cmath>
-#include <cstring>
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 
 static const int SA_MAX_SAMPLES = 36000;
 static const int SA_MAX_TRANSITIONS = 128;
@@ -194,9 +195,14 @@ class StateAnalyzer {
  public:
   void init(const float *known_weights_kg, int num_cats) {
     num_known_ = 0;
+    for (int i = 0; i < SA_MAX_CATS; i++) {
+      slot_g_[i] = 0.0f;
+      cat_presence_[i] = 0;
+    }
     for (int i = 0; i < num_cats && i < SA_MAX_CATS; i++) {
       if (known_weights_kg[i] > 0.0f) {
-        known_g_[num_known_++] = known_weights_kg[i] * 1000.0f;
+        slot_g_[i] = known_weights_kg[i] * 1000.0f;
+        known_g_[num_known_++] = slot_g_[i];
       }
     }
     std::sort(known_g_, known_g_ + num_known_);
@@ -246,7 +252,9 @@ class StateAnalyzer {
         }
         break;
 
-      case AnalyzerState::OCCUPIED:
+      case AnalyzerState::OCCUPIED: {
+        int ci = closest_known_cat(mean1s);
+        if (ci >= 0) cat_presence_[ci]++;
         if (stable_now && near_known(mean1s))
           transition_to(AnalyzerState::ELIMINATING);
         if (weight < entry_delta) {
@@ -265,8 +273,11 @@ class StateAnalyzer {
           exit_below_ = 0;
         }
         break;
+      }
 
-      case AnalyzerState::ELIMINATING:
+      case AnalyzerState::ELIMINATING: {
+        int ci_elim = closest_known_cat(mean1s);
+        if (ci_elim >= 0) cat_presence_[ci_elim]++;
         if (stable_now) {
           stable_cnt_++;
         } else {
@@ -285,6 +296,7 @@ class StateAnalyzer {
           exit_below_ = 0;
         }
         break;
+      }
 
       case AnalyzerState::GAP:
         gap_cnt_++;
@@ -324,8 +336,7 @@ class StateAnalyzer {
     r.elimination_type =
         classify_elimination(r.periods, r.period_count, std_dev_threshold);
 
-    r.detected_cat =
-        identify_cat(r.cat_weight, known_weights_kg, num_cats);
+    r.detected_cat = detected_cat_from_presence();
 
     return r;
   }
@@ -344,6 +355,7 @@ class StateAnalyzer {
     stable_cnt_ = 0;
     tx_count_ = 0;
     waste_weight_ = 0.0f;
+    for (int i = 0; i < SA_MAX_CATS; i++) cat_presence_[i] = 0;
   }
 
   AnalyzerState current_state() const { return state_; }
@@ -363,6 +375,9 @@ class StateAnalyzer {
 
   AnalyzerState state_ = AnalyzerState::EMPTY;
   float known_g_[SA_MAX_CATS] = {};
+  /** Known cat weight per config slot (g); 0 = empty. Same indexing as init() input (sorted in replay). */
+  float slot_g_[SA_MAX_CATS] = {};
+  int cat_presence_[SA_MAX_CATS] = {};
   int num_known_ = 0;
   Ring window_{WINDOW};
   Ring weight_hist_{WINDOW};
@@ -399,6 +414,7 @@ class StateAnalyzer {
     gap_cnt_ = 0;
     stable_cnt_ = 0;
     tx_count_ = 0;
+    for (int i = 0; i < SA_MAX_CATS; i++) cat_presence_[i] = 0;
   }
 
   void transition_to(AnalyzerState ns, int offset = 0) {
@@ -420,6 +436,36 @@ class StateAnalyzer {
       }
     }
     state_ = ns;
+  }
+
+  /** among cats within tolerance, smallest absolute diff wins. */
+  int closest_known_cat(float val_g, float tol = KNOWN_TOL) const {
+    int best = -1;
+    float min_diff = 1e9f;
+    for (int i = 0; i < SA_MAX_CATS; i++) {
+      float w = slot_g_[i];
+      if (w <= 0.0f) continue;
+      float diff = fabsf(val_g - w);
+      if (diff <= w * tol && diff < min_diff) {
+        min_diff = diff;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  /** highest count wins; ties go to lower slot index. */
+  int detected_cat_from_presence() const {
+    int best = -1;
+    int best_count = 0;
+    for (int i = 0; i < SA_MAX_CATS; i++) {
+      if (slot_g_[i] <= 0.0f) continue;
+      if (cat_presence_[i] > best_count) {
+        best_count = cat_presence_[i];
+        best = i;
+      }
+    }
+    return best_count > 0 ? best : -1;
   }
 
   bool near_known(float val, float tol = KNOWN_TOL) const {
@@ -520,23 +566,6 @@ class StateAnalyzer {
     return EliminationType::UNKNOWN;
   }
 
-  // Match detected cat weight to known cats (10% margin, closest wins)
-  static int identify_cat(float cat_weight_g,
-                          const float *known_kg, int num_cats) {
-    float min_diff = 1e9f;
-    int best = -1;
-    for (int i = 0; i < num_cats; i++) {
-      float known_g = known_kg[i] * 1000.0f;
-      if (known_g <= 0.0f) continue;
-      float diff = fabsf(cat_weight_g - known_g);
-      float margin = known_g * 0.1f;
-      if (diff <= margin && diff < min_diff) {
-        min_diff = diff;
-        best = i;
-      }
-    }
-    return best;
-  }
 };
 
 // Singleton accessors for use across ESPHome lambdas
