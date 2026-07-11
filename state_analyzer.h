@@ -3,10 +3,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 static const int SA_MAX_SAMPLES = 36000;
-static const int SA_MAX_TRANSITIONS = 128;
-static const int SA_MAX_PERIODS = 64;
+/** Long visits can oscillate often; dropping txs breaks post_process vs TS (was 128). */
+static const int SA_MAX_TRANSITIONS = 2048;
+/** Must cover all tx segments before merge (short visits can exceed 64 transitions). */
+static const int SA_MAX_PERIODS = 256;
 static const int SA_MAX_CATS = 5;
 static const int SA_MAX_ZONES = 32;
 static const float SA_URINATION_STD_DEV_THRESHOLD_G = 4.0f;
@@ -57,7 +60,7 @@ struct ZoneEntry {
   int16_t scale;     // SA_SCALE_ABS or SA_SCALE_DELTA
 };
 
-// Ring buffer for rolling statistics over a fixed window
+// Ring buffer for rolling statistics over a fixed window.
 class Ring {
  public:
   Ring() : n_(0), i_(0), filled_(0) { memset(buf_, 0, sizeof(buf_)); }
@@ -76,7 +79,7 @@ class Ring {
     if (!filled_) return 0.0f;
     float s = 0.0f;
     for (int k = 0; k < filled_; k++) s += buf_[k];
-    return s / filled_;
+    return s / static_cast<float>(filled_);
   }
 
   // Sample variance (divides by n-1)
@@ -88,7 +91,7 @@ class Ring {
       float d = buf_[k] - m;
       s += d * d;
     }
-    return s / (filled_ - 1);
+    return s / static_cast<float>(filled_ - 1);
   }
 
   // Checks ALL n slots including unfilled zeros, matching the TS Array.every()
@@ -118,6 +121,45 @@ class Ring {
   int filled_;
 };
 
+/** TS rmsAroundMean: sqrt(mean squared deviation from mean). */
+inline float rms_around_mean(const float *samples, int n) {
+  if (n < 2) return 0.0f;
+  float sum = 0.0f;
+  for (int i = 0; i < n; ++i) sum += samples[i];
+  float mean = sum / static_cast<float>(n);
+  float sq = 0.0f;
+  for (int i = 0; i < n; ++i) {
+    float d = samples[i] - mean;
+    sq += d * d;
+  }
+  return sqrtf(sq / static_cast<float>(n));
+}
+
+/**
+ * TS eliminatingPeriodMotionMetric: full hz-sample windows, RMS-around-mean each,
+ * then median. Undefined when n < 2 (returns -1).
+ */
+inline float eliminating_period_motion_metric(const float *samples, int n,
+                                              int hz_rounded) {
+  if (n < 2) return -1.0f;
+  const int ws = hz_rounded >= 1 ? hz_rounded : 1;
+  if (n < ws) return rms_around_mean(samples, n);
+
+  const int window_count = n / ws;
+  std::vector<float> rms_values;
+  rms_values.reserve(static_cast<size_t>(window_count));
+  for (int w = 0; w < window_count; ++w) {
+    const int off = w * ws;
+    rms_values.push_back(rms_around_mean(samples + off, ws));
+  }
+  std::sort(rms_values.begin(), rms_values.end());
+  const int mid = static_cast<int>(rms_values.size()) / 2;
+  if (rms_values.size() % 2u)
+    return rms_values[static_cast<size_t>(mid)];
+  return 0.5f * (rms_values[static_cast<size_t>(mid - 1)] +
+                 rms_values[static_cast<size_t>(mid)]);
+}
+
 // Stores raw weight samples for post-hoc per-period variance calculation.
 //
 // Samples are stored in one of two encodings, tracked via a zone table:
@@ -125,8 +167,7 @@ class Ring {
 //   Delta zones (SA_SCALE_DELTA=10):  int16_t((weight_g-base)*10) -- 0.1g precision
 //
 // Delta zones are opened at each OCCUPIED entry; absolute zones at GAP/ENTERING.
-// compute_std_dev() is only ever called on ELIMINATING windows, which always
-// fall inside a delta zone, so it unconditionally applies /SA_SCALE_DELTA.
+// elimination_motion_metric() decodes per zone and applies TS median-RMS metric.
 class WeightBuffer {
  public:
   void reset() {
@@ -159,31 +200,41 @@ class WeightBuffer {
 
   int count() const { return count_; }
 
-  // Population std dev of the ELIMINATING window [start+trim, end+1-trim).
-  // Always called on delta-encoded samples; divides result by SA_SCALE_DELTA
-  // to convert back to grams.
-  float compute_std_dev(int start, int end) const {
+  /**
+   * Motion metric for an ELIMINATING period — matches TS processEvent:
+   * slice [start+10, end+1-10), decode to grams, eliminatingPeriodMotionMetric(..., hz=10).
+   */
+  float elimination_motion_metric(int start, int end, int hz) const {
     const int trim = 10;
     int s = start + trim;
     int e = end + 1 - trim;
     if (s >= e || s < 0 || e > count_) return -1.0f;
-
     int n = e - s;
     if (n < 2) return -1.0f;
 
-    float sum = 0.0f;
-    for (int i = s; i < e; i++) sum += samples_[i];
-    float m = sum / n;
-
-    float var_sum = 0.0f;
-    for (int i = s; i < e; i++) {
-      float d = samples_[i] - m;
-      var_sum += d * d;
-    }
-    return sqrtf(var_sum / n) / SA_SCALE_DELTA;
+    std::vector<float> dec;
+    dec.reserve(static_cast<size_t>(n));
+    for (int i = s; i < e; ++i) dec.push_back(sample_to_grams(i));
+    return eliminating_period_motion_metric(dec.data(), n, hz);
   }
 
  private:
+  const ZoneEntry *zone_for_index(int idx) const {
+    for (int z = 0; z < zone_count_; ++z) {
+      int next_start = (z + 1 < zone_count_) ? zones_[z + 1].start : count_;
+      if (idx >= zones_[z].start && idx < next_start) return &zones_[z];
+    }
+    return nullptr;
+  }
+
+  float sample_to_grams(int idx) const {
+    const ZoneEntry *z = zone_for_index(idx);
+    if (!z || idx < 0 || idx >= count_) return 0.0f;
+    float enc = static_cast<float>(samples_[idx]);
+    if (z->scale == SA_SCALE_ABS) return enc;
+    return z->baseline_g + enc / static_cast<float>(z->scale);
+  }
+
   int16_t samples_[SA_MAX_SAMPLES];
   int count_ = 0;
   ZoneEntry zones_[SA_MAX_ZONES];
@@ -211,7 +262,11 @@ class StateAnalyzer {
 
   void attach_buffer(WeightBuffer *buf) { wbuf_ = buf; }
 
+  /** `weight` in grams (float — matches firmware HX711 path). */
   void process_sample(float weight, int index) {
+    // Stop updating rings/state once the weight buffer is full (1 h at 10 Hz).
+    if (session_active_ && index - session_start_ > MAX_SESSION) return;
+
     current_weight_g_ = weight;
     current_sample_ = index;
     window_.push(weight);
@@ -219,11 +274,8 @@ class StateAnalyzer {
     float mean1s = window_.mean();
     mean_hist_.push(mean1s);
     float var10 = weight_hist_.variance();
-    bool stable_now = var10 > 0.0f && var10 < STABLE_VARIANCE;
-
-    if (session_active_ &&
-        current_sample_ - session_start_ > MAX_SESSION)
-      return;
+    float var10sample = var10 > 0.0f ? sqrtf(var10) : 0.0f;
+    bool stable_now = var10sample > 0.0f && var10sample < STABLE_VARIANCE_SQRT;
 
     float entry_delta = entry_threshold();
     float presence_th =
@@ -239,7 +291,7 @@ class StateAnalyzer {
 
       case AnalyzerState::ENTERING:
         if (!confirm_presence(mean1s)) {
-          if (mean1s < 0.5f * entry_threshold())
+          if (mean1s < 0.5 * entry_delta)
             transition_to(AnalyzerState::GAP, WINDOW / 2);
           break;
         }
@@ -280,8 +332,16 @@ class StateAnalyzer {
         if (ci_elim >= 0) cat_presence_[ci_elim]++;
         if (stable_now) {
           stable_cnt_++;
+          elim_sum_ += mean1s;
+          elim_count_++;
+          cat_weight_ = elim_sum_ / static_cast<float>(elim_count_);
         } else {
-          update_cat_weight(mean1s, stable_cnt_);
+          if (elim_count_ > best_elim_dur_) {
+            best_elim_dur_ = elim_count_;
+            best_elim_weight_ = elim_sum_ / static_cast<float>(elim_count_);
+          }
+          elim_sum_ = 0.0f;
+          elim_count_ = 0;
           stable_cnt_ = 0;
           transition_to(AnalyzerState::OCCUPIED);
         }
@@ -308,7 +368,7 @@ class StateAnalyzer {
             transition_to(AnalyzerState::ENTERING);
           }
         } else if (gap_cnt_ > REENTRY_WIN) {
-          waste_weight_ = weight;
+          waste_weight_ = static_cast<float>(weight);
           return;
         }
         break;
@@ -322,7 +382,10 @@ class StateAnalyzer {
                        int num_cats,
                        float std_dev_threshold = SA_URINATION_STD_DEV_THRESHOLD_G) const {
     StateResult r;
-    r.cat_weight = cat_weight_ > 0.0f ? cat_weight_ : best_stable_w_;
+    float best_w = best_elim_weight_;
+    if (elim_count_ > best_elim_dur_ && elim_count_ > 0)
+      best_w = elim_sum_ / static_cast<float>(elim_count_);
+    r.cat_weight = (best_w > 0.0f) ? best_w : cat_weight_;
     r.waste_weight = waste_weight_;
     r.period_count = 0;
 
@@ -330,7 +393,7 @@ class StateAnalyzer {
 
     for (int i = 0; i < r.period_count; i++) {
       r.periods[i].std_dev =
-          buf.compute_std_dev(r.periods[i].start, r.periods[i].end);
+          buf.elimination_motion_metric(r.periods[i].start, r.periods[i].end, HZ);
     }
 
     r.elimination_type =
@@ -348,8 +411,10 @@ class StateAnalyzer {
     weight_hist_.reset(WINDOW);
     mean_hist_.reset(3);
     cat_weight_ = 0.0f;
-    best_stable_w_ = 0.0f;
-    best_stable_dur_ = 0;
+    elim_sum_ = 0.0f;
+    elim_count_ = 0;
+    best_elim_weight_ = 0.0f;
+    best_elim_dur_ = 0;
     exit_below_ = 0;
     gap_cnt_ = 0;
     stable_cnt_ = 0;
@@ -362,13 +427,15 @@ class StateAnalyzer {
 
  private:
   static constexpr int HZ = 10;
-  static constexpr float STABLE_VARIANCE = 250.0f; // ~15g std dev
+  /** sqrt(250) — TS compares sqrt(sample var) to this (not variance to 250). */
+  static constexpr float STABLE_VARIANCE_SQRT = 15.811388f;
   static constexpr float STABLE_MERGE_GAP = 1.5f * HZ;
   static constexpr float ENTRY_DELTA_MIN = 1200.0f;
   static constexpr float ENTRY_DELTA_FRAC = 0.22f;
   static constexpr float PRESENCE_FRAC = 0.28f;
   static constexpr int EXIT_HOLD = 6;
   static constexpr int REENTRY_WIN = 15 * HZ;
+  /** At 10 Hz, 36000 samples = 1 h — matches SA_MAX_SAMPLES. */
   static constexpr int MAX_SESSION = 60 * 60 * HZ;
   static constexpr float KNOWN_TOL = 0.1f;
   static constexpr int WINDOW = 10;
@@ -390,8 +457,10 @@ class StateAnalyzer {
   int current_sample_ = 0;
   float waste_weight_ = 0.0f;
   float cat_weight_ = 0.0f;
-  float best_stable_w_ = 0.0f;
-  int best_stable_dur_ = 0;
+  float elim_sum_ = 0.0f;
+  int elim_count_ = 0;
+  float best_elim_weight_ = 0.0f;
+  int best_elim_dur_ = 0;
   float current_weight_g_ = 0.0f;
   WeightBuffer *wbuf_ = nullptr;
   StateTransition txs_[SA_MAX_TRANSITIONS];
@@ -408,8 +477,10 @@ class StateAnalyzer {
     session_active_ = true;
     session_start_ = current_sample_;
     cat_weight_ = 0.0f;
-    best_stable_w_ = 0.0f;
-    best_stable_dur_ = 0;
+    elim_sum_ = 0.0f;
+    elim_count_ = 0;
+    best_elim_weight_ = 0.0f;
+    best_elim_dur_ = 0;
     exit_below_ = 0;
     gap_cnt_ = 0;
     stable_cnt_ = 0;
@@ -445,7 +516,7 @@ class StateAnalyzer {
     for (int i = 0; i < SA_MAX_CATS; i++) {
       float w = slot_g_[i];
       if (w <= 0.0f) continue;
-      float diff = fabsf(val_g - w);
+      float diff = std::abs(val_g - w);
       if (diff <= w * tol && diff < min_diff) {
         min_diff = diff;
         best = i;
@@ -471,24 +542,13 @@ class StateAnalyzer {
   bool near_known(float val, float tol = KNOWN_TOL) const {
     for (int i = 0; i < num_known_; i++) {
       float w = known_g_[i];
-      if (w > 0.0f && fabsf(val - w) / w <= tol) return true;
+      if (w > 0.0f && std::abs(val - w) / w <= tol) return true;
     }
     return false;
   }
 
   bool confirm_presence(float rel) const {
     return near_known(rel) || rel > entry_threshold();
-  }
-
-  void update_cat_weight(float stable_w, int dur) {
-    if (dur > best_stable_dur_) {
-      best_stable_dur_ = dur;
-      best_stable_w_ = stable_w;
-    }
-    if (cat_weight_ <= 0.0f)
-      cat_weight_ = best_stable_w_;
-    else
-      cat_weight_ = 0.9f * cat_weight_ + 0.1f * best_stable_w_;
   }
 
   void post_process(StatePeriod *out, int &count) const {
