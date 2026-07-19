@@ -3,18 +3,30 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <vector>
 
 static const int SA_MAX_SAMPLES = 36000;
 /** Long visits can oscillate often; dropping txs breaks post_process vs TS (was 128). */
 static const int SA_MAX_TRANSITIONS = 2048;
 /** Must cover all tx segments before merge (short visits can exceed 64 transitions). */
 static const int SA_MAX_PERIODS = 256;
+/** Max RMS windows for median-RMS metric at 10 Hz over SA_MAX_SAMPLES. */
+static const int SA_MOTION_HZ = 10;
+static const int SA_MAX_MOTION_WINDOWS = SA_MAX_SAMPLES / SA_MOTION_HZ;
 static const int SA_MAX_CATS = 5;
 static const int SA_MAX_ZONES = 32;
 static const float SA_URINATION_STD_DEV_THRESHOLD_G = 4.0f;
 static const int16_t SA_SCALE_ABS = 1;    // 1g, identical to previous behavior
 static const int16_t SA_SCALE_DELTA = 10; // 0.1g, used during OCCUPIED/ELIMINATING
+
+/**
+ * Scratch for median-RMS over eliminating windows.
+ * Function-static so it lives in BSS (not the ESPHome 8 KiB loop stack / heap).
+ * Single-threaded: only one finalize/replay at a time.
+ */
+inline float *sa_motion_rms_scratch() {
+  static float buf[SA_MAX_MOTION_WINDOWS];
+  return buf;
+}
 
 enum class AnalyzerState : uint8_t {
   EMPTY,
@@ -121,45 +133,6 @@ class Ring {
   int filled_;
 };
 
-/** TS rmsAroundMean: sqrt(mean squared deviation from mean). */
-inline float rms_around_mean(const float *samples, int n) {
-  if (n < 2) return 0.0f;
-  float sum = 0.0f;
-  for (int i = 0; i < n; ++i) sum += samples[i];
-  float mean = sum / static_cast<float>(n);
-  float sq = 0.0f;
-  for (int i = 0; i < n; ++i) {
-    float d = samples[i] - mean;
-    sq += d * d;
-  }
-  return sqrtf(sq / static_cast<float>(n));
-}
-
-/**
- * TS eliminatingPeriodMotionMetric: full hz-sample windows, RMS-around-mean each,
- * then median. Undefined when n < 2 (returns -1).
- */
-inline float eliminating_period_motion_metric(const float *samples, int n,
-                                              int hz_rounded) {
-  if (n < 2) return -1.0f;
-  const int ws = hz_rounded >= 1 ? hz_rounded : 1;
-  if (n < ws) return rms_around_mean(samples, n);
-
-  const int window_count = n / ws;
-  std::vector<float> rms_values;
-  rms_values.reserve(static_cast<size_t>(window_count));
-  for (int w = 0; w < window_count; ++w) {
-    const int off = w * ws;
-    rms_values.push_back(rms_around_mean(samples + off, ws));
-  }
-  std::sort(rms_values.begin(), rms_values.end());
-  const int mid = static_cast<int>(rms_values.size()) / 2;
-  if (rms_values.size() % 2u)
-    return rms_values[static_cast<size_t>(mid)];
-  return 0.5f * (rms_values[static_cast<size_t>(mid - 1)] +
-                 rms_values[static_cast<size_t>(mid)]);
-}
-
 // Stores raw weight samples for post-hoc per-period variance calculation.
 //
 // Samples are stored in one of two encodings, tracked via a zone table:
@@ -203,6 +176,8 @@ class WeightBuffer {
   /**
    * Motion metric for an ELIMINATING period — matches TS processEvent:
    * slice [start+10, end+1-10), decode to grams, eliminatingPeriodMotionMetric(..., hz=10).
+   *
+   * No heap: decodes window-by-window; RMS list uses sa_motion_rms_scratch() BSS.
    */
   float elimination_motion_metric(int start, int end, int hz) const {
     const int trim = 10;
@@ -212,10 +187,21 @@ class WeightBuffer {
     int n = e - s;
     if (n < 2) return -1.0f;
 
-    std::vector<float> dec;
-    dec.reserve(static_cast<size_t>(n));
-    for (int i = s; i < e; ++i) dec.push_back(sample_to_grams(i));
-    return eliminating_period_motion_metric(dec.data(), n, hz);
+    const int ws = hz >= 1 ? hz : 1;
+    if (n < ws) return rms_around_mean_range(s, n);
+
+    const int window_count = n / ws;
+    if (window_count > SA_MAX_MOTION_WINDOWS) return -1.0f;
+
+    float *rms_values = sa_motion_rms_scratch();
+    for (int w = 0; w < window_count; ++w)
+      rms_values[w] = rms_around_mean_range(s + w * ws, ws);
+
+    std::sort(rms_values, rms_values + window_count);
+    const int mid = window_count / 2;
+    if (window_count % 2)
+      return rms_values[mid];
+    return 0.5f * (rms_values[mid - 1] + rms_values[mid]);
   }
 
  private:
@@ -233,6 +219,20 @@ class WeightBuffer {
     float enc = static_cast<float>(samples_[idx]);
     if (z->scale == SA_SCALE_ABS) return enc;
     return z->baseline_g + enc / static_cast<float>(z->scale);
+  }
+
+  /** TS rmsAroundMean over decoded grams in [s, s+n) without a heap decode buffer. */
+  float rms_around_mean_range(int s, int n) const {
+    if (n < 2) return 0.0f;
+    float sum = 0.0f;
+    for (int i = 0; i < n; ++i) sum += sample_to_grams(s + i);
+    float mean = sum / static_cast<float>(n);
+    float sq = 0.0f;
+    for (int i = 0; i < n; ++i) {
+      float d = sample_to_grams(s + i) - mean;
+      sq += d * d;
+    }
+    return sqrtf(sq / static_cast<float>(n));
   }
 
   int16_t samples_[SA_MAX_SAMPLES];
@@ -377,31 +377,35 @@ class StateAnalyzer {
 
   // Call after the session ends to compute final results.
   // Requires the WeightBuffer that was filled alongside process_sample calls.
-  StateResult finalize(const WeightBuffer &buf,
-                       const float *known_weights_kg,
-                       int num_cats,
-                       float std_dev_threshold = SA_URINATION_STD_DEV_THRESHOLD_G) const {
-    StateResult r;
+  //
+  // Returns a reference to member storage — do NOT put StateResult on the
+  // ESPHome loop stack (periods[SA_MAX_PERIODS] alone is ~4 KiB).
+  const StateResult &finalize(const WeightBuffer &buf,
+                              const float *known_weights_kg,
+                              int num_cats,
+                              float std_dev_threshold = SA_URINATION_STD_DEV_THRESHOLD_G) {
     float best_w = best_elim_weight_;
     if (elim_count_ > best_elim_dur_ && elim_count_ > 0)
       best_w = elim_sum_ / static_cast<float>(elim_count_);
-    r.cat_weight = (best_w > 0.0f) ? best_w : cat_weight_;
-    r.waste_weight = waste_weight_;
-    r.period_count = 0;
+    result_.cat_weight = (best_w > 0.0f) ? best_w : cat_weight_;
+    result_.waste_weight = waste_weight_;
+    result_.period_count = 0;
+    result_.elimination_type = EliminationType::UNKNOWN;
+    result_.detected_cat = -1;
 
-    post_process(r.periods, r.period_count);
+    post_process(result_.periods, result_.period_count);
 
-    for (int i = 0; i < r.period_count; i++) {
-      r.periods[i].std_dev =
-          buf.elimination_motion_metric(r.periods[i].start, r.periods[i].end, HZ);
+    for (int i = 0; i < result_.period_count; i++) {
+      result_.periods[i].std_dev =
+          buf.elimination_motion_metric(result_.periods[i].start, result_.periods[i].end, HZ);
     }
 
-    r.elimination_type =
-        classify_elimination(r.periods, r.period_count, std_dev_threshold);
+    result_.elimination_type =
+        classify_elimination(result_.periods, result_.period_count, std_dev_threshold);
 
-    r.detected_cat = detected_cat_from_presence();
+    result_.detected_cat = detected_cat_from_presence();
 
-    return r;
+    return result_;
   }
 
   void reset() {
@@ -465,6 +469,13 @@ class StateAnalyzer {
   WeightBuffer *wbuf_ = nullptr;
   StateTransition txs_[SA_MAX_TRANSITIONS];
   int tx_count_ = 0;
+  /** Finalize output — BSS, not loop-stack. */
+  StateResult result_{};
+  /**
+   * Shared period scratch for post_process then classify_elimination
+   * (sequential; never live at the same time). Keeps ~4 KiB off the stack.
+   */
+  StatePeriod period_scratch_[SA_MAX_PERIODS] = {};
 
   float entry_threshold() const {
     float min_known = num_known_ > 0 ? known_g_[0] : 0.0f;
@@ -551,11 +562,11 @@ class StateAnalyzer {
     return near_known(rel) || rel > entry_threshold();
   }
 
-  void post_process(StatePeriod *out, int &count) const {
+  void post_process(StatePeriod *out, int &count) {
     count = 0;
     if (tx_count_ == 0) return;
 
-    StatePeriod tmp[SA_MAX_PERIODS];
+    StatePeriod *tmp = period_scratch_;
     int n = 0;
 
     for (int i = 0; i < tx_count_ && n < SA_MAX_PERIODS; i++) {
@@ -603,10 +614,10 @@ class StateAnalyzer {
     }
   }
 
-  static EliminationType classify_elimination(const StatePeriod *p,
-                                              int count,
-                                              float threshold) {
-    StatePeriod elim[SA_MAX_PERIODS];
+  EliminationType classify_elimination(const StatePeriod *p,
+                                       int count,
+                                       float threshold) {
+    StatePeriod *elim = period_scratch_;
     int ec = 0;
     for (int i = 0; i < count; i++) {
       if (p[i].state == AnalyzerState::ELIMINATING && p[i].std_dev >= 0.0f)

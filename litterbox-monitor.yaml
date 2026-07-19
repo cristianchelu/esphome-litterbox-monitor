@@ -161,7 +161,7 @@ api:
       then:
         - lambda: !lambda |-
             if (cat < 1 || cat > 5) {
-              ESP_LOGE("CAT", "Invalid cat index %d. Must be between 1 and 5.", cat);
+              ESP_LOGE("CAT", "Invalid cat index %d. Must be between 1 and 5.", (int) cat);
               return;
             }
             id(cat_weights)[cat - 1] = weight;
@@ -697,7 +697,7 @@ binary_sensor:
           id(is_cat_event) = false;
 
           if (duration >= 10 && samples >= 100) {
-            StateResult result = get_analyzer().finalize(
+            const StateResult &result = get_analyzer().finalize(
                 get_weight_buf(), id(cat_weights), 5,
                 id(elimination_std_dev_threshold).state);
 
@@ -861,7 +861,7 @@ script:
             binary_sensor.is_off: vibration_detected
           then:
             - lambda: !lambda |-
-                id(calibration_tare_temp) = id(hx711_analog_value).raw_state;
+                id(calibration_tare_temp) = id(hx711_analog_value).get_raw_state();
             - logger.log:
                 level: INFO
                 tag: calibration
@@ -892,7 +892,7 @@ script:
                 tag: calibration
                 format: "Calculating new calibration coefficient..."
             - lambda: !lambda |-
-                float measured_raw = id(hx711_analog_value).raw_state - id(calibration_tare_temp);
+                float measured_raw = id(hx711_analog_value).get_raw_state() - id(calibration_tare_temp);
 
                 float new_coefficient = measured_raw / known_weight_kg;
 
