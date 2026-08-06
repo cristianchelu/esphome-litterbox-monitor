@@ -1,61 +1,127 @@
 # ESPHome Litterbox Monitor
 
-A smart litterbox monitor powered by ESPHome and an ESP32, designed to track
-cat visits, waste, and litter status using load cells.
+A DIY smart litterbox: four load cells under the box, an HX711, and an
+ESP32 running ESPHome. A state analyzer on the chip turns the raw 10 Hz
+weight signal into everything listed below — no camera, no cloud, no
+external compute — and surfaces it in Home Assistant as native sensors,
+buttons, and actions.
 
 ![Dashboard Overview](docs/dashboard.png)
 
 ## Features
 
-- **Weight tracking:** Measures total litterbox weight and detects changes.
-- ***PoopSense* waste recognition:** Recognizes #1 from #2. [How it works ->](docs/POOPSENSE.md)
-- **Multiple cat detection:** Identifies cats by weight (supports 1-5 cats).
-- **Waste weight tracking:** Tracks total accumulated waste after each visit.
-- **Remaining litter tracking:** Calculates remaining litter after clean events.
-- **Deep clean / replace litter reminder:** Notifies when it's time to change litter (configurable interval).
-- **Clean event detection:** Detects and resets waste/litter counters after removing waste.
-- **Visit counting:** Total visits since clean plus per-cat daily visits, pees, and poos.
-- **Automatic tare:** Maintains accurate zeroing of the scale.
-- **Home Assistant integration:** All sensors and actions are available in Home Assistant.
+- **Knows which cat is which.** Identifies visiting cats by weight (up to 5)
+  and tracks each cat's weight over time — no collars, no cameras.
+- **Logs every visit.** Per-cat daily counts of visits, pees, and poops,
+  plus visit duration and total visits since the last scoop.
+- ***PoopSense.*** Tells #1 from #2 using nothing but the weight signal.
+  [How it works ->](docs/POOPSENSE.md)
+- **Tells you when to scoop.** Tracks how much waste has piled up since the
+  last clean — and detects the clean itself, so the counters reset on their
+  own when you scoop.
+- **Tells you when to deep clean.** Configurable reminder for full litter
+  changes.
+- **Watches the litter level.** Estimates how much litter is left in the box
+  so you know when to top up.
+- **Takes care of itself.** Auto-tares to cancel scale drift.
 
-## How to Use
+## What You Need
 
-### Hardware Setup
+### Load cells
 
-Update the configuration with the correct GPIO pins for your HX711,
-as you have wired it to your ESP32.
+- 4× strain gauge load cells, one per corner of the baseboard (commonly
+  available on AliExpress); 5-12.5 kg each covers most setups.
+- Sizing is a balancing act: strong enough to survive the cat's landing,
+  small enough that PoopSense can still see grams. For a typical
+  single-cat setup, 4× 6-8 kg cells hit the sweet spot.
+- The full math — sizing formula, worked examples, and resolution table —
+  lives in the **[load cell sizing guide](docs/LOAD_CELLS.md)**.
 
-Change the timezone substitution to your local timezone.
+### Load cell amplifier (HX711)
 
-Ensure your `secrets.yaml` defines `litterbox_api_key`, `litterbox_ota_password`,
-`litterbox_ap_password`, `wifi_ssid`, and `wifi_password`.
+- Any HX711 breakout board will work, BUT:
+- Boards with separate `VCC` (5V for load cells) and `VDD` (3.3V for ESP32 logic) are recommended for best accuracy.
+  - Recommended, known good example: [Sparkfun HX711 v1.1](https://www.sparkfun.com/sparkfun-load-cell-amplifier-hx711.html)
+  - _BEWARE_ Some no-name breakout boards have separate `VCC` and `VDD` pins but
+    electrically tie them together. Supplying 5V to these _will_ kill the esp chip.
+    Validate these with a multimeter before applying power.
 
-Both [`litterbox-monitor.yaml`](litterbox-monitor.yaml) and [`state_analyzer.h`](state_analyzer.h) must be in the same directory (clone the repo or copy both files).
+### ESP32
 
-### Configuring Cats
+- Use a variant with a **hardware FPU**: the classic ESP32 (what the
+  config targets and the development build runs) or the ESP32-S3.
+- PoopSense leans on float math — per-sample filtering at 10 Hz and
+  standard-deviation crunching at 0.1 g precision after every visit — so
+  variants that emulate floats in software (S2, C3, C6) are untested.
 
-This configuration supports 1-5 cats out of the box. The example substitutions 
-shows two cats, but you should configure this before first flashing:
+### Litterbox and base
 
-- Update the `cats` substitution in the YAML configuration to include your 
-  cat names (e.g., "Fluffy", "Whiskers", "Mittens"). Add or remove from the list
-  as needed.
-- Only the cats you define will have corresponding weight and daily visit 
-  sensors available in Home Assistant.
-- After flashing, use the `set_cat_weight` API service to set the weight 
-  for each cat (See Initial Calibration section below).
+- For large breeds, the [IKEA SAMLA 79x57x18 cm/55 l](https://www.ikea.com/us/en/p/samla-box-with-lid-clear-s39440814/#content)
+  is a good DIY litterbox.
+- Can be paired with a suitable [IKEA KOMPLEMENT](https://www.ikea.com/gb/en/p/komplement-shelf-white-90277961/)
+  shelf as a base.
 
-### Initial calibration
+### Calibration tools
 
-Tools required: Kitchen scale, Bathroom scale, weights totalling 4~5kg.
+You'll also want these on hand for the calibration step later:
 
-1. Take your weights and measure them to the nearest gram
-   on a known good kitchen scale.
-   - Note: All scales become inaccurate nearing their maximum capacity.
-           For example, with a "5kg max" scale, measure 2 x 2L bottles of 
-           water and sum their weights instead of one 5L bottle for best results.
+- A known good kitchen scale.
+- A bathroom scale (for weighing the cats).
+- Calibration weights adding up to roughly your everyday load — box +
+  litter + cat (~20 kg on the XL build). Several small water bottles work
+  great; one big jug does not — see [Calibration](#calibration) for why.
 
-2. Set the `Calibration Known Weight` number entity to the weight 
+## Assembly
+
+Follow this great [SparkFun HX711 Hookup Guide](https://learn.sparkfun.com/tutorials/load-cell-amplifier-hx711-breakout-hookup-guide/all)
+for wiring the load cells to the HX711 and mounting them under the baseboard.
+
+Wire the HX711 to the ESP32. The configuration defaults to:
+
+| HX711 pin | ESP32 pin |
+|---|---|
+| `DOUT` / `DT` | `GPIO16` |
+| `SCK` / `CLK` | `GPIO4` |
+
+You can use different pins — just update the `hx711` sensor section of the
+YAML to match your wiring.
+
+## Firmware Setup
+
+1. Clone this repo (or copy both [`litterbox-monitor.yaml`](litterbox-monitor.yaml)
+   and [`state_analyzer.h`](state_analyzer.h) into the same directory — both
+   files are required).
+
+2. Create a `secrets.yaml` next to them defining:
+   `wifi_ssid`, `wifi_password`, `litterbox_api_key`, `litterbox_ota_password`,
+   and `litterbox_ap_password`.
+
+3. Edit the `substitutions` block at the top of the YAML:
+
+   - **`cats`** — your cat names (e.g. "Fluffy", "Whiskers", "Mittens").
+     1-5 cats are supported; add or remove entries as needed. Only the cats
+     you define will have corresponding weight and daily visit sensors in
+     Home Assistant, so configure this before first flashing. (After
+     flashing, you'll set each cat's weight with the `set_cat_weight`
+     action — see [Calibration](#calibration).)
+   - **`timezone`** — your local timezone (used by the daily counters).
+
+4. If you wired the HX711 to different GPIO pins, update the `hx711` sensor
+   section accordingly (see [Assembly](#assembly)).
+
+5. Flash with ESPHome as usual.
+
+## Calibration
+
+1. Gather calibration weights adding up to roughly what the cells will
+   carry day to day — box + litter + cat (~20 kg on the XL build) — and
+   measure them to the nearest gram in batches your kitchen scale is
+   comfortable with (2 L bottles, two at a time, on a "5 kg max" scale).
+
+   Several small bottles at working load beat one big jug: scales are
+   only accurate mid-range — [here's why](docs/LOAD_CELLS.md#the-calibration-weight).
+
+2. Set the `Calibration Known Weight` number entity to the weight
    you measured (in grams).
 
 3. Make sure the constructed base is **without anything on top**, resting on
@@ -63,14 +129,14 @@ Tools required: Kitchen scale, Bathroom scale, weights totalling 4~5kg.
 
 4. Press the `Calibrate Scale` button. This will capture the zero point (tare).
 
-5. Place the known weights on the base and press the `Calibrate Scale` 
+5. Place the known weights on the base and press the `Calibrate Scale`
    button again. This will complete the calibration process.
-   
+
    The "Raw weight" sensor should now read the weight you placed on it,
    and the "Calibration Last Performed" sensor should read the current time.
    If this is not the case, consult the ESPHome logs for errors and repeat
    steps 2-5.
-   
+
 6. ***Optional*** Fill in "Empty Box Weight" number entity to the weight of the
     empty litterbox (in grams). This will improve the accuracy of the
     "Litter Remaining" sensor. You can place the box on the monitor and read
@@ -84,62 +150,15 @@ Tools required: Kitchen scale, Bathroom scale, weights totalling 4~5kg.
    then weighing yourself again while holding each cat, and
    subtracting the difference.
 
-   Use the `set_cat_weight` action within Home Assistant to set 
+   Use the `set_cat_weight` action within Home Assistant to set
    an initial value for each cat's weight, in the order you defined them
-   in the configuration (see Actions section below).
+   in the configuration (see [Actions](#actions-services) below).
 
-The monitor is now ready to be used.
+That's it — the monitor is ready to use.
 
-### Actions (Services)
+## Reference
 
-- `set_cat_weight`: Set a cat's weight manually via Home Assistant or API.
-  - Parameters: `cat` (int, 1-5), `weight` (float)
-  - Example: To set Cat 1's weight to 5.2kg, call `set_cat_weight` with `cat=1`, `weight=5.2`.
-
-### Synchronize Multiple Litterboxes
-
-If you have multiple litterboxes, use a Home Assistant automation to synchronize cat weights:
-
-When a cat's weight is updated on one litterbox, trigger the `set_cat_weight` action on the others.
-
-## Hardware
-
-Follow this great [SparkFun HX711 Hookup Guide](https://learn.sparkfun.com/tutorials/load-cell-amplifier-hx711-breakout-hookup-guide/all) for assembly instructions.
-
-### Load Cell Amplifier
-
-- Any HX711 breakout board will work, BUT:
-- Boards with separate `VCC` (5V for load cells) and `VDD` (3.3V for ESP32 logic) are recommended for best accuracy.
-  - Recommended, known good example: [Sparkfun HX711 v1.1](https://www.sparkfun.com/sparkfun-load-cell-amplifier-hx711.html)
-  - _BEWARE_ Some no-name breakout boards have separate `VCC` and `VDD` pins but
-    electrically tie them together. Supplying 5V to these _will_ kill the esp chip.
-    Validate these with a multimeter before applying power.
-
-### Load Cells
-
-- 4× 5-10kg strain gauge load cells (commonly available on AliExpress).
-- Choose the load cell capacity based on:
-  - Baseboard + litterbox + litter + (heaviest cat × 2 for jump impact) × 1.5 safety margin.
-  - Example: normal setup (average cat): (1 kg baseboard + 0.5 kg box + 2.5 kg litter + 5 kg cat × 2) × 1.5 = **21 kg** -> 24~32 kg cells (4× 6~8kg)
-  - Example: XL setup (large cat): (1.5 kg box + 5 kg litter + 10 kg cat × 2) × 1.5 = **39.75 kg** -> 40 kg cells (4× 10kg)
-- For normal weight tracking and occupancy detection, any sensibly sized load cell set will work.
-- Higher capacity load cells reduce measurement resolution.
-- For PoopSense event-type classification, see the
-  [detailed load cell selection table](docs/POOPSENSE.md#resolution-table).
-
-
-### ESP32
-
-- Any ESP32 devkit board is compatible.
-
-### Litterbox
-
-- For large breeds, the [IKEA SAMLA 79x57x18 cm/55 l](https://www.ikea.com/us/en/p/samla-box-with-lid-clear-s39440814/#content)
-  is a good DIY litterbox.
-- Can be paired with a suitable [IKEA KOMPLEMENT](https://www.ikea.com/gb/en/p/komplement-shelf-white-90277961/)
-  shelf as a base.
-
-## Sensors and Entities
+### Sensors and Entities
 
 - **Cat 1-5 Weight:** Last weight stored for each cat when PoopSense identifies
   them on a visit (only enabled cats are visible).
@@ -163,21 +182,33 @@ Follow this great [SparkFun HX711 Hookup Guide](https://learn.sparkfun.com/tutor
   full visit analysis when activity ends).
 - **Raw/Unfiltered/Tared Weight:** Diagnostic weight readings.
 
-## Number Entities
+### Number Entities
 
 - **Litter Change Interval:** Configure the number of days between deep clean reminders (7-30 days, default: 30).
 - **Classification Threshold:** Standard deviation threshold (in grams) that separates urination from defecation. The default of 4 g works well out of the box; raise it if defecation events are being over-reported, lower it if they're being missed.  See [PoopSense](docs/POOPSENSE.md) for details.
 - **Calibration Known Weight:** Weight of calibration objects used during scale setup.
 - **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations.
 
-## Buttons
+### Buttons
 
 - **Reset Deep Clean Timer:** Resets the deep clean countdown.
 - **Reset Clean:** Resets tare, litter, waste, and visit counters.
 
   Only required if the automatic clean detection failed.
 
-## TODO
+### Actions (Services)
+
+- `set_cat_weight`: Set a cat's weight manually via Home Assistant or API.
+  - Parameters: `cat` (int, 1-5), `weight` (float)
+  - Example: To set Cat 1's weight to 5.2kg, call `set_cat_weight` with `cat=1`, `weight=5.2`.
+
+### Synchronize Multiple Litterboxes
+
+Running more than one litterbox? Keep the cat weights in sync with a small
+Home Assistant automation: when a cat's weight updates on one box, call
+`set_cat_weight` on the others.
+
+## Roadmap
 
 - [x] Runtime assisted calibration.
 - [x] Easier adding/removing of pets.

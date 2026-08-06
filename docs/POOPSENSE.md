@@ -203,32 +203,12 @@ The decision gap is narrow.  In practice:
 
 That's roughly **0.5 g** of daylight between a noisy urination event
 and the defecation threshold.  If quantization eats into that margin,
-near-threshold events become coin flips.  Rule of thumb:
+near-threshold events become coin flips -- as a rule of thumb, the
+scale needs **0.25 g/count or better** to stay comfortably clear.
 
-- **<= 0.25 g/count**: plenty of room
-- **0.25-0.5 g/count**: workable, tighter on edge cases
-- **> 0.5 g/count**: too coarse -- the classifier starts guessing
-
-### Resolution Table
-
-For common 4-cell bridge configurations. **g/count** values below are
-**ballparks** (typical cheap cells, HX711 gain 128, real-world
-usable 20-bit resolution):
-
-| Cell Rating | g/count @ 3.3V | Verdict @ 3.3V | g/count @ 5V | Verdict @ 5V |
-|---|---|---|---|---|
-| 4× 5kg = 20kg | ~0.12 | ✅ | ~0.08 | ✅ |
-| 4× 8kg = 32kg | ~0.19 | ✅ | ~0.12 | ✅ |
-| 4× 10kg = 40kg | ~0.23 | ✅ | ~0.15 | ✅ |
-| 4× 12.5kg = 50kg | ~0.29 | ⚠️ borderline | ~0.19 | ✅ |
-| 4× 20kg = 100kg | ~0.58 | ❌ | ~0.38 | ⚠️ borderline |
-| 4× 50kg = 200kg | ~1.2 | ❌ | ~0.76 | ❌ |
-
-"Bigger load cells just to be safe" eventually works against you.
-Presence detection doesn't care about resolution, but waste-type
-classification does -- you need cells rated high enough to handle the
-cat, the litter, and the box, but not so high that the ADC can't
-resolve a few grams of variance.
+Which cell ratings and excitation voltages actually deliver that -- and
+how to size the cells for the cat in the first place -- is covered in
+the [load cell sizing guide](LOAD_CELLS.md), resolution table included.
 
 ## Future Work
 
@@ -279,10 +259,12 @@ been built yet.
 ## Implementation
 
 The entire implementation lives in
-[`state_analyzer.h`](state_analyzer.h) -- a single C++ header included
+[`state_analyzer.h`](../state_analyzer.h) -- a single C++ header included
 by the ESPHome configuration.  No external dependencies, no network
 calls, no cloud.  It runs comfortably within the memory and CPU budget
-of an ESP32.
+of a classic ESP32 -- provided the chip has a hardware FPU (see the
+README's ESP32 notes); the math is float-heavy and software-float
+variants are untested.
 
 ---
 
