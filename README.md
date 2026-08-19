@@ -181,6 +181,8 @@ That's it — the monitor is ready to use.
   known cat for 2+ seconds (used internally for activity; PoopSense does the
   full visit analysis when activity ends).
 - **Raw/Unfiltered/Tared Weight:** Diagnostic weight readings.
+- **WiFi Signal:** Diagnostic RSSI in dBm, published once a minute as the median
+  of four samples.
 
 ### Number Entities
 

@@ -592,6 +592,17 @@ sensor:
     unit_of_measurement: "g"
     accuracy_decimals: 1
     update_interval: never
+  - platform: wifi_signal
+    id: wifi_signal_db
+    name: "WiFi Signal"
+    entity_category: diagnostic
+    update_interval: 15s
+    filters:
+      # RSSI swings a few dB between samples. Publish the median of four so a
+      # bars gauge tracks the link rather than the noise, still once a minute.
+      - median:
+          window_size: 4
+          send_every: 4
 
 text_sensor:
   - platform: template
