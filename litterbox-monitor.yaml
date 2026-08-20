@@ -548,6 +548,10 @@ sensor:
     accuracy_decimals: 0
     update_interval: never
     state_class: measurement
+  # NAN until the first reset ("0 days" would claim a deadline nobody set),
+  # fractional so the last day still counts down, negative once overdue —
+  # clamping at 0 made "expired yesterday" and "expired last month" read
+  # the same.
   - platform: template
     id: litter_life_left
     name: "Deep Clean Timer"
@@ -555,17 +559,32 @@ sensor:
     device_class: duration
     state_class: measurement
     unit_of_measurement: "d"
-    accuracy_decimals: 0
+    accuracy_decimals: 1
+    lambda: !lambda |-
+      auto last_changed = id(litter_changed_date);
+      if (last_changed == 0 || !id(homeassistant_time).now().is_valid()) {
+        return NAN;
+      }
+      const double seconds_per_day = 60 * 60 * 24;
+      double due = last_changed +
+                   id(litter_change_interval).state * seconds_per_day;
+      double now = id(homeassistant_time).now().timestamp;
+      return (due - now) / seconds_per_day;
+  # The due moment itself. A timestamp is a fact that survives reboots on
+  # both ends and needs no clock to compute, so API clients get it in the
+  # initial state dump even when the countdown can't run yet.
+  - platform: template
+    id: deep_clean_due
+    name: "Deep Clean Due"
+    icon: mdi:broom
+    device_class: timestamp
     lambda: !lambda |-
       auto last_changed = id(litter_changed_date);
       if (last_changed == 0) {
-        return 0;
+        return NAN;
       }
-      const double seconds_per_day = 60 * 60 * 24;
-      auto interval = id(litter_change_interval).state;
-      double now = id(homeassistant_time).now().timestamp;
-      double dur = last_changed + (interval * seconds_per_day) - now;
-      return std::max(std::floor(dur / seconds_per_day), (double)0);
+      return (double) (last_changed +
+             (time_t) (id(litter_change_interval).state * 24 * 3600));
   - platform: template
     id: calibration_last_performed
     name: "Calibration Last Performed"
@@ -806,9 +825,17 @@ button:
     name: "Reset Deep Clean Timer"
     icon: mdi:reload
     on_press:
+      # Unsynced clock reads as seconds-since-boot; stamping that would set
+      # the due date fifty years into the past. Better to ignore the press
+      # than to record a lie.
       - lambda: !lambda |-
-          id(litter_changed_date) = id(homeassistant_time).now().timestamp;
+          if (id(homeassistant_time).now().is_valid()) {
+            id(litter_changed_date) = id(homeassistant_time).now().timestamp;
+          } else {
+            ESP_LOGW("clean", "Reset ignored: clock not synced yet");
+          }
       - component.update: litter_life_left
+      - component.update: deep_clean_due
   - platform: template
     name: "Reset Clean"
     icon: mdi:reload
