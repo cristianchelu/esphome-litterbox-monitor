@@ -542,6 +542,21 @@ sensor:
     name: "Litter Remaining"
     icon: "mdi:tray-full"
     accuracy_decimals: 2
+  # Litter remaining as a share of a full box.
+  - platform: template
+    id: litter_level
+    name: "Litter Level"
+    icon: "mdi:tray-full"
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: !lambda |-
+      float full = id(litter_full_weight).state;
+      float remaining = id(litter_weight).state;
+      if (std::isnan(full) || full <= 0.0f || std::isnan(remaining)) {
+        return NAN;
+      }
+      return clamp(remaining / full * 100.0f, 0.0f, 100.0f);
   - platform: template
     name: "Visits since clean"
     id: visits
@@ -688,6 +703,21 @@ number:
     min_value: 0
     max_value: 10000
     step: 1
+    mode: box
+    initial_value: "0"
+    restore_value: True
+  # What "100%" means for the litter level. 0 leaves that sensor unknown.
+  - platform: template
+    name: "Full Litter Weight"
+    id: litter_full_weight
+    icon: "mdi:tray-full"
+    device_class: weight
+    unit_of_measurement: kg
+    entity_category: config
+    optimistic: true
+    min_value: 0
+    max_value: 20
+    step: 0.1
     mode: box
     initial_value: "0"
     restore_value: True

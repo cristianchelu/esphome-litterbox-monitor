@@ -144,6 +144,9 @@ YAML to match your wiring.
 
 7. Set the litterbox on top, add the litter and trigger the `Reset clean` button.
 
+   ***Optional*** Copy the "Litter Remaining" reading into the "Full Litter
+   Weight" number entity to get "Litter Level" percentage estimates.
+
 8. Take the approximate weight of your cats (within 10%).
 
    This can be easily done with weighing yourself on a bathroom scale,
@@ -171,6 +174,8 @@ That's it — the monitor is ready to use.
   when PoopSense runs at the end of activity).
 - **Waste Weight:** Estimated total accumulated waste (grams) since last clean.
 - **Litter Remaining:** Estimated remaining litter (kg).
+- **Litter Level:** The same estimate as a percentage of "Full Litter Weight".
+  Unavailable until you set that number.
 - **Visits:** Number of cat visits since last clean.
 - **Deep Clean Timer:** Days left until next recommended deep clean / litter change.
 - **Cat Weight:** Diagnostic sensor (disabled by default) showing the cat weight
@@ -190,6 +195,7 @@ That's it — the monitor is ready to use.
 - **Classification Threshold:** Standard deviation threshold (in grams) that separates urination from defecation. The default of 4 g works well out of the box; raise it if defecation events are being over-reported, lower it if they're being missed.  See [PoopSense](docs/POOPSENSE.md) for details.
 - **Calibration Known Weight:** Weight of calibration objects used during scale setup.
 - **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations.
+- **Full Litter Weight:** How much litter (in kg) a freshly filled box holds — what the "Litter Level" percentage counts as 100%. Left at 0, that sensor stays unavailable.
 
 ### Buttons
 
