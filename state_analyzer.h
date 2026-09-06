@@ -639,6 +639,314 @@ class StateAnalyzer {
 
 };
 
+// ---------------------------------------------------------------------------
+// BoxMonitor — what is on the scale besides a cat.
+//
+// Runs on the absolute (calibrated, un-tared) weight at 10 Hz, always, not only
+// during activity: the interesting moments straddle event boundaries (the box
+// leaves in one event and comes back in the next). Absolute grams make the
+// shapes unambiguous where event-relative deltas are not:
+//   raw < -lift_g        the whole monitor is in the air, frame hanging
+//   |raw| < off_tol      bare board — the box is off, and 0 g is a known weight
+//   raw ≈ box_g          the box came back empty: a deep clean
+//   then +N kg steps     bags of litter poured in, evened out, left alone
+// Per event it also keeps the list of plateaus (stable ≥ 2 s) so the end-of-
+// event classifier can ask "rose monotonically, then went inert?".
+// ---------------------------------------------------------------------------
+
+static const int BM_MAX_PLATEAUS = 32;
+
+enum class BoxState : uint8_t { NORMAL, LIFTED, OFF, EMPTY };
+
+enum class BoxEventKind : uint8_t { NONE, LIFTED, DEEP_CLEAN, TOP_UP, SCOOP };
+
+struct Plateau {
+  int start;
+  int end;  // exclusive
+  float mean_g;
+  float sigma_g;
+};
+
+struct BoxConfig {
+  float box_g;         // configured empty box weight; 0 = unknown (no deep-clean detection)
+  float off_tol_g;     // |raw| below this, stable: box off (and zero check)
+  float empty_tol_g;   // |raw - box_g| below this, stable, after absence: deep clean
+  float lift_g;        // raw below -lift_g: monitor lifted
+  float return_tol_g;  // put back within this of the pre-event level: nothing changed
+  float top_up_min_g;  // smallest rise reported as a top-up
+  float scoop_min_g;   // drop (positive number) that counts as a scoop
+  int scoop_min_s;     // ...unless the event is at least this long
+  int settle_s;        // inert seconds before a top-up ends the event
+};
+
+struct BoxEvent {
+  BoxEventKind kind;
+  float level_g;         // absolute level at the end (last plateau if there is one)
+  float litter_added_g;  // deep clean / top-up: how much went in
+  float box_measured_g;  // deep clean: what the empty box actually weighed
+  float zero_error_g;    // bare-board reading, valid when zero_valid
+  bool zero_valid;
+  bool absent;           // box not on the board at the end — do not tare
+  bool scooped;          // top-up: litter came out before the bag went in
+};
+
+class BoxMonitor {
+ public:
+  void configure(const BoxConfig &c) { cfg_ = c; }
+
+  /** `base_g`: absolute level the event is measured against (the last tare). */
+  void begin_event(float base_g) {
+    base_g_ = base_g;
+    ev_start_ = n_;
+    pl_count_ = 0;
+    pl_overflow_ = false;
+    saw_lifted_ = false;
+    saw_off_ = false;
+    began_absent_ = absent_;
+    deep_clean_ = false;
+    empty_pl_ = -1;
+    zero_valid_ = false;
+    zero_error_g_ = 0.0f;
+    box_measured_g_ = 0.0f;
+    inert_len_ = 0;
+  }
+
+  /** Every sample, in absolute grams, event or not. */
+  void process(float g) {
+    n_++;
+    win_.push(g);
+    if (win_.size() < WINDOW) return;
+    float m = win_.mean();
+    float sd = sqrtf(win_.variance());
+    bool stable = sd < PLATEAU_SIGMA;
+
+    if (stable) {
+      if (pl_n_ == 0) pl_start_ = n_ - WINDOW;
+      pl_n_++;
+      double d = g - pl_mean_;
+      pl_mean_ += d / pl_n_;
+      pl_m2_ += d * (g - pl_mean_);
+    } else if (pl_n_ > 0) {
+      close_plateau();
+    }
+    inert_len_ = sd < INERT_SIGMA ? inert_len_ + 1 : 0;
+
+    // Box state. Absence latches until a stable plateau with something in
+    // the box shows up again, so "off in one event, back in the next" works.
+    bool absent_now = below_box(m);
+    if (m < -cfg_.lift_g) {
+      state_ = BoxState::LIFTED;
+      saw_lifted_ = true;
+      absent_ = true;
+      hold_ = 0;
+    } else if (stable && std::abs(m) < cfg_.off_tol_g) {
+      state_ = BoxState::OFF;
+      saw_off_ = true;
+      absent_ = true;
+      if (++hold_ >= HOLD && pl_n_ >= HOLD) {
+        zero_error_g_ = static_cast<float>(pl_mean_);
+        zero_valid_ = true;
+      }
+    } else if (stable && cfg_.box_g > 0.0f && (absent_ || state_ == BoxState::EMPTY) &&
+               std::abs(m - cfg_.box_g) < cfg_.empty_tol_g) {
+      if (state_ != BoxState::EMPTY && ++hold_ >= HOLD) {
+        state_ = BoxState::EMPTY;
+        deep_clean_ = true;
+        box_measured_g_ = static_cast<float>(pl_mean_);
+        empty_pl_ = pl_count_;  // the open plateau closes into this slot
+        absent_ = false;
+      }
+    } else {
+      if (absent_now) absent_ = true;
+      else if (stable) absent_ = false;
+      if (state_ == BoxState::LIFTED || state_ == BoxState::OFF) {
+        if (!absent_now) state_ = BoxState::NORMAL;
+      } else if (state_ == BoxState::EMPTY && stable) {
+        state_ = BoxState::NORMAL;
+      }
+      hold_ = 0;
+    }
+  }
+
+  BoxState state() const { return state_; }
+  bool absent() const { return absent_; }
+
+  /**
+   * True once the stability window is full and `state()` means something. Until
+   * then it is only the NORMAL it was constructed with, which is a guess: a
+   * board that boots with the box off reads normal for the first second.
+   */
+  bool ready() const { return win_.size() >= WINDOW; }
+
+  /**
+   * True once a top-up (or a deep clean plus refill) has gone inert for
+   * settle_s: the box is settled and the event can end without waiting for the
+   * inactivity timeout. Inertness alone is the proof there is no cat — a bag
+   * can weigh exactly what a cat does, but no cat holds σ < 1 g for 30 s.
+   */
+  bool settled() const {
+    if (inert_len_ < cfg_.settle_s * HZ || absent_) return false;
+    return deep_clean_ || current_level() - base_g_ >= cfg_.top_up_min_g;
+  }
+
+  /**
+   * Classify the event. Call once, at event end, before taring.
+   * `cat_event`: the analyzer saw a known cat during this event. Only scoops
+   * defer to it; a rise that went inert is litter whatever the analyzer
+   * matched it to, and the caller drops the visit.
+   */
+  const BoxEvent &finalize(int duration_s, bool cat_event) {
+    bool ended_stable = pl_n_ >= MIN_PLATEAU;
+    bool ended_inert = inert_len_ >= cfg_.settle_s * HZ;
+    if (ended_stable) close_plateau();
+    BoxEvent &r = result_;
+    r.kind = BoxEventKind::NONE;
+    r.level_g = pl_count_ > 0 ? pl_[pl_count_ - 1].mean_g : win_.mean();
+    r.litter_added_g = 0.0f;
+    r.box_measured_g = box_measured_g_;
+    r.zero_error_g = zero_error_g_;
+    r.zero_valid = zero_valid_;
+    r.absent = absent_;
+    r.scooped = false;
+    float delta = r.level_g - base_g_;
+
+    if (absent_) {
+      // Still off or in the air: nothing to conclude until it comes back.
+      r.kind = state_ == BoxState::LIFTED ? BoxEventKind::LIFTED : BoxEventKind::NONE;
+      return r;
+    }
+    if (deep_clean_) {
+      r.kind = BoxEventKind::DEEP_CLEAN;
+      // The box came back empty, so whatever is in it now went in since.
+      if (r.level_g > box_measured_g_ + cfg_.top_up_min_g)
+        r.litter_added_g = r.level_g - box_measured_g_;
+      return r;
+    }
+    // The whole monitor went up and came back down: a few grams of settling
+    // is not a scoop, the box was never opened.
+    if (saw_lifted_ && std::abs(delta) < cfg_.return_tol_g) {
+      r.kind = BoxEventKind::LIFTED;
+      return r;
+    }
+    // The box went off and came back with nothing taken out or put in.
+    if ((saw_off_ || began_absent_) && delta > -cfg_.scoop_min_g &&
+        delta < cfg_.return_tol_g) {
+      r.kind = BoxEventKind::LIFTED;
+      return r;
+    }
+    // A rise that went inert is litter whatever it weighs: a bag can match a
+    // cat to the gram, but no cat holds still this long. Measured from the
+    // lowest point of the event rather than its start, so scooping before
+    // the pour is not subtracted from the bag (it is reported alongside).
+    int ls = ladder_start();
+    float from = ls < pl_count_ ? std::min(base_g_, pl_[ls].mean_g) : base_g_;
+    if (ended_inert && r.level_g - from >= cfg_.top_up_min_g && monotonic_from(ls)) {
+      r.kind = BoxEventKind::TOP_UP;
+      r.litter_added_g = r.level_g - from;
+      r.scooped = base_g_ - from >= cfg_.scoop_min_g;
+      return r;
+    }
+    // A lift-and-return needs no minimum duration: the absence already says
+    // the box was opened, so a drop is a scoop however quick the hands were.
+    if (!cat_event && delta <= -cfg_.scoop_min_g &&
+        (duration_s >= cfg_.scoop_min_s || began_absent_ || saw_off_)) {
+      r.kind = BoxEventKind::SCOOP;
+      return r;
+    }
+    return r;
+  }
+
+  int plateau_count() const { return pl_count_; }
+  const Plateau &plateau(int i) const { return pl_[i]; }
+
+ private:
+  static constexpr int HZ = 10;
+  static constexpr int WINDOW = 10;
+  /** Same bar as the analyzer's stability: sqrt(250). */
+  static constexpr float PLATEAU_SIGMA = 15.811388f;
+  /**
+   * Inert: nothing alive on the box. Over 1552 verified visits the longest a
+   * cat held a 1 s window under 1 g was 11 s; poured litter holds it forever.
+   */
+  static constexpr float INERT_SIGMA = 1.0f;
+  static constexpr int MIN_PLATEAU = 2 * HZ;
+  static constexpr int HOLD = 3 * HZ;
+  /**
+   * Successive plateau means jitter by a few grams (cell creep after a kilo
+   * lands, a hand off the rim). A drop bigger than this is mass leaving.
+   */
+  static constexpr float LEVEL_TOL = 50.0f;
+
+  BoxConfig cfg_{};
+  Ring win_{WINDOW};
+  int n_ = 0;
+  BoxState state_ = BoxState::NORMAL;
+  bool absent_ = false;
+  int hold_ = 0;
+  int inert_len_ = 0;
+  // open plateau (Welford, double: sums of 1e4 g over 1e4 samples lose float bits)
+  int pl_start_ = 0;
+  int pl_n_ = 0;
+  double pl_mean_ = 0.0;
+  double pl_m2_ = 0.0;
+  // per event
+  float base_g_ = 0.0f;
+  int ev_start_ = 0;
+  Plateau pl_[BM_MAX_PLATEAUS];
+  int pl_count_ = 0;
+  bool pl_overflow_ = false;
+  bool saw_lifted_ = false;
+  bool saw_off_ = false;
+  bool began_absent_ = false;
+  bool deep_clean_ = false;
+  int empty_pl_ = -1;
+  float box_measured_g_ = 0.0f;
+  float zero_error_g_ = 0.0f;
+  bool zero_valid_ = false;
+  BoxEvent result_{};
+
+  /** Below anything the box can weigh: it is off the board (or the board is in the air). */
+  bool below_box(float g) const {
+    return cfg_.box_g > 0.0f ? g < 0.5f * cfg_.box_g : g < cfg_.off_tol_g;
+  }
+
+  /** Lowest plateau since the box was last away: where a pour starts from. */
+  int ladder_start() const {
+    int s = 0;
+    for (int i = 0; i < pl_count_; i++)
+      if (below_box(pl_[i].mean_g)) s = i + 1;
+    int lo = s;
+    for (int i = s + 1; i < pl_count_; i++)
+      if (pl_[i].mean_g < pl_[lo].mean_g) lo = i;
+    return lo;
+  }
+
+  void close_plateau() {
+    if (pl_n_ >= MIN_PLATEAU && pl_start_ >= ev_start_) {
+      float sigma = pl_n_ > 1 ? sqrtf(static_cast<float>(pl_m2_ / (pl_n_ - 1))) : 0.0f;
+      if (pl_count_ < BM_MAX_PLATEAUS)
+        pl_[pl_count_++] = {pl_start_, pl_start_ + pl_n_, static_cast<float>(pl_mean_), sigma};
+      else
+        pl_overflow_ = true;
+    }
+    pl_n_ = 0;
+    pl_mean_ = 0.0;
+    pl_m2_ = 0.0;
+  }
+
+  float current_level() const {
+    return pl_n_ >= MIN_PLATEAU ? static_cast<float>(pl_mean_) : win_.mean();
+  }
+
+  /** Plateaus from `from` on never drop by more than the jitter tolerance. */
+  bool monotonic_from(int from) const {
+    if (pl_overflow_) return false;
+    for (int i = from + 1; i < pl_count_; i++)
+      if (pl_[i].mean_g < pl_[i - 1].mean_g - LEVEL_TOL) return false;
+    return true;
+  }
+};
+
 // Singleton accessors for use across ESPHome lambdas
 inline StateAnalyzer &get_analyzer() {
   static StateAnalyzer instance;
@@ -648,9 +956,34 @@ inline WeightBuffer &get_weight_buf() {
   static WeightBuffer instance;
   return instance;
 }
+inline BoxMonitor &get_box_monitor() {
+  static BoxMonitor instance;
+  return instance;
+}
 inline int &get_sample_idx() {
   static int idx = 0;
   return idx;
+}
+
+inline const char *box_state_str(BoxState s) {
+  switch (s) {
+    case BoxState::NORMAL: return "normal";
+    case BoxState::LIFTED: return "lifted";
+    case BoxState::OFF:    return "off";
+    case BoxState::EMPTY:  return "empty";
+  }
+  return "unknown";
+}
+
+inline const char *box_event_str(BoxEventKind k) {
+  switch (k) {
+    case BoxEventKind::NONE:       return "none";
+    case BoxEventKind::LIFTED:     return "lifted";
+    case BoxEventKind::DEEP_CLEAN: return "deep_clean";
+    case BoxEventKind::TOP_UP:     return "top_up";
+    case BoxEventKind::SCOOP:      return "scoop";
+  }
+  return "none";
 }
 
 inline const char *analyzer_state_str(AnalyzerState s) {

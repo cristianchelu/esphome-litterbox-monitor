@@ -19,11 +19,14 @@ buttons, and actions.
 - **Tells you when to scoop.** Tracks how much waste has piled up since the
   last clean — and detects the clean itself, so the counters reset on their
   own when you scoop.
-- **Tells you when to deep clean.** Configurable reminder for full litter
-  changes.
+- **Tells you when to deep clean, and notices when you do.** Configurable
+  reminder for full litter changes; put the washed box back empty and the
+  timer restarts on its own. [How it works ->](docs/BOX_TRACKING.md)
 - **Watches the litter level.** Estimates how much litter is left in the box
-  so you know when to top up.
-- **Takes care of itself.** Auto-tares to cancel scale drift.
+  so you know when to top up, and counts each bag you pour in.
+- **Takes care of itself.** Re-zeroes against the bare board whenever the box
+  comes off, and tells a scoop from a top-up from you lifting the whole thing
+  to clean underneath.
 
 ## What You Need
 
@@ -139,8 +142,9 @@ YAML to match your wiring.
 
 6. ***Optional*** Fill in "Empty Box Weight" number entity to the weight of the
     empty litterbox (in grams). This will improve the accuracy of the
-    "Litter Remaining" sensor. You can place the box on the monitor and read
-    the "Raw weight" sensor to get this value.
+    "Litter Remaining" sensor, and it is how a deep clean is recognised: the
+    box coming back within 150 g of this weight. You can place the box on the
+    monitor and read the "Raw weight" sensor to get this value.
 
 7. Set the litterbox on top, add the litter and trigger the `Reset clean` button.
 
@@ -178,14 +182,36 @@ That's it — the monitor is ready to use.
   Unavailable until you set that number.
 - **Visits:** Number of cat visits since last clean.
 - **Deep Clean Timer:** Days left until next recommended deep clean / litter change.
+- **Deep Clean Due:** The same deadline as a timestamp, so it survives reboots
+  on both ends and shows up before the clock has synced.
+- **Calibration Last Performed:** Timestamp of the last completed scale
+  calibration. Unavailable until one has been run.
+- **Litter Added:** Grams poured in at the last top-up or deep clean.
+- **Maintenance:** Event entity that fires `scoop`, `top_up`, `deep_clean` or
+  `lifted` (the whole monitor was picked up and put back) once the counters
+  have been updated. Use it as an automation trigger.
+  [How it works ->](docs/BOX_TRACKING.md)
 - **Cat Weight:** Diagnostic sensor (disabled by default) showing the cat weight
   in kg from the last PoopSense result.
+- **Elimination Std Dev:** Diagnostic; the standard deviation (grams) of the
+  elimination window PoopSense classified last. Compare it with the
+  Classification Threshold when tuning.
+- **State Machine:** Diagnostic text sensor with the analyzer's current
+  phase: `empty`, `entering`, `occupied`, `eliminating` or `gap`.
 - **Occupancy, Activity, Vibration:** Diagnostic sensors for physical presence,
   combined activity, and scale jitter.
 - **Cat Event:** Diagnostic occupancy-style hint when tared weight is close to a
   known cat for 2+ seconds (used internally for activity; PoopSense does the
   full visit analysis when activity ends).
+- **Box State:** Diagnostic text sensor: `normal`, `lifted` (monitor in the
+  air), `off` (bare board) or `empty` (washed box back, nothing in it yet).
+- **Measured Box Weight:** Diagnostic; what the empty box weighed when it last
+  came back from a deep clean, to compare with the Empty Box Weight setting.
+- **Zero Drift:** Diagnostic; what the bare board read the last time the box
+  was off, before the zero was corrected.
 - **Raw/Unfiltered/Tared Weight:** Diagnostic weight readings.
+- **Analog sensor value:** Diagnostic (disabled by default); the raw HX711
+  count before calibration is applied.
 - **WiFi Signal:** Diagnostic RSSI in dBm, published once a minute as the median
   of four samples.
 
@@ -194,7 +220,7 @@ That's it — the monitor is ready to use.
 - **Litter Change Interval:** Configure the number of days between deep clean reminders (7-30 days, default: 30).
 - **Classification Threshold:** Standard deviation threshold (in grams) that separates urination from defecation. The default of 4 g works well out of the box; raise it if defecation events are being over-reported, lower it if they're being missed.  See [PoopSense](docs/POOPSENSE.md) for details.
 - **Calibration Known Weight:** Weight of calibration objects used during scale setup.
-- **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations.
+- **Empty Box Weight:** Weight of the empty litterbox for improved litter remaining calculations. Also what deep-clean detection compares against; left at 0, deep cleans are not detected.
 - **Full Litter Weight:** How much litter (in kg) a freshly filled box holds — what the "Litter Level" percentage counts as 100%. Left at 0, that sensor stays unavailable.
 
 ### Buttons
@@ -203,6 +229,9 @@ That's it — the monitor is ready to use.
 - **Reset Clean:** Resets tare, litter, waste, and visit counters.
 
   Only required if the automatic clean detection failed.
+- **Calibrate Scale:** Runs the two-step calibration: first press tares the
+  bare board, second press (with the known weight on) sets the span. See
+  [Calibration](#calibration).
 
 ### Actions (Services)
 
@@ -221,10 +250,11 @@ Home Assistant automation: when a cat's weight updates on one box, call
 - [x] Runtime assisted calibration.
 - [x] Easier adding/removing of pets.
 - [x] Distinguish urination/defecation/no-waste events.
-- [ ] Automatic periodic calibration using the empty litterbox weight.
+- [x] Automatic zero calibration whenever the box comes off the board.
 - [ ] Calculate trends and alert for outliers.
 - [ ] Distinguish cats of similar weight.
-- [ ] Automatic deep clean detection.
+- [x] Automatic deep clean detection.
+- [x] Litter top-up detection.
 - [ ] Error state detection (debris stuck underneath, box misaligned)
 
 ## Acknowledgements

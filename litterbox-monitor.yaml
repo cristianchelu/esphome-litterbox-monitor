@@ -25,7 +25,7 @@ substitutions:
   min_clean_event_duration: "30" # seconds
 
   #  Minimum weight threshold to consider a clean event valid.
-  min_clean_event_weight: "-10" # g
+  min_clean_event_weight: "-20" # g
 
   # Duration of no vibration detected before vibration sensor is considered off.
   vibration_off_delay: "4" # seconds
@@ -47,6 +47,33 @@ substitutions:
   # Used as fallback when weight sensor reads above detection thresholds after
   # a litterbox event.
   event_timeout: "120" # seconds
+
+  # Box tracking. All on the absolute (calibrated, un-tared) weight, so the
+  # bare board is 0 g and the empty box is Empty Box Weight.
+
+  # Reading this close to 0 g while stable means the box is off the board.
+  # Also the zero check: whatever it reads then is drift, and gets corrected.
+  box_off_tolerance: "300" # g
+
+  # Box back within this of Empty Box Weight, after having been off, is a
+  # deep clean. A washed box comes back a few grams wet; a scooped one comes
+  # back kilograms heavier.
+  box_empty_tolerance: "150" # g
+
+  # Reading more negative than this means the monitor itself is in the air
+  # (the frame hangs from the cells). Nothing else reads below zero.
+  monitor_lift_threshold: "1000" # g
+
+  # Box (or monitor) put back within this of where it was: nothing changed.
+  lift_return_tolerance: "100" # g
+
+  # Smallest rise reported as a litter top-up.
+  min_top_up_weight: "300" # g
+
+  # Mass that sits this long without a wobble (1 s σ < 1 g) is litter, not a
+  # cat, whatever it weighs: the stillest cat on record managed 11 s. Ends a
+  # top-up early and is what a rise must do to count as one.
+  top_up_settle_time: "30" # seconds
 
 globals:
   ## General state
@@ -80,8 +107,15 @@ globals:
 
   ## Event-related state variables
 
-  # Whether a known cat was detected by weight during the event
-  - id: is_cat_event
+  # An event is being recorded (begin_event ran, end_event hasn't yet)
+  - id: event_open
+    type: bool
+    initial_value: "false"
+    restore_value: False
+
+  # The previous event ended on the inactivity timeout with a cat still in
+  # the box. The visit was already counted; the next event only adds waste.
+  - id: suppress_visit
     type: bool
     initial_value: "false"
     restore_value: False
@@ -141,6 +175,14 @@ esphome:
   project:
     name: "CristianChelu.LitterboxMonitor"
     version: "esp32.hx711"
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: configure_box_monitor
+      # The analyzer only runs inside an event, so its sensor would sit
+      # unpublished until the first visit ended. With no event open it is
+      # empty by definition, so say so rather than leaving it unknown.
+      - lambda: 'id(state_machine_state).publish_state("empty");'
 
 esp32:
   board: esp32dev
@@ -432,7 +474,24 @@ sensor:
           }
     on_value:
       - lambda: !lambda |-
-          if (!id(activity_detected).state) return;
+          // The box tracker runs on the absolute reading at all times, so it
+          // knows whether the box is on the board before an event even starts.
+          BoxMonitor &bm = get_box_monitor();
+          static BoxState prev_box = BoxState::NORMAL;
+          static bool box_published = false;
+          bm.process(x * 1000.0f);
+          // Publish once at startup as well as on change: the tracker starts in
+          // NORMAL, so a box that is simply sitting there never trips an edge
+          // and the sensor would stay unpublished until the first lift. Wait
+          // for the window to fill first — a second of unknown beats a second
+          // of a normal that may be wrong.
+          if (bm.ready() && (bm.state() != prev_box || !box_published)) {
+            id(box_state).publish_state(box_state_str(bm.state()));
+            prev_box = bm.state();
+            box_published = true;
+          }
+
+          if (!id(event_open)) return;
           float tared_g = (x - id(tare_value) - id(auto_tare_value)) * 1000.0f;
           static AnalyzerState prev_state = AnalyzerState::EMPTY;
           get_analyzer().process_sample(tared_g, get_sample_idx());
@@ -443,6 +502,14 @@ sensor:
           }
           get_weight_buf().push(tared_g);
           get_sample_idx()++;
+
+          // Fresh litter sitting dead still doesn't need to wait out the
+          // inactivity timeout (which only runs because the added mass keeps
+          // the occupancy latch on). Nothing runs after this: end_event may
+          // reopen the event and reset the buffers.
+          if (bm.settled()) {
+            id(end_event).execute();
+          }
 
   - platform: copy
     id: hx711_unfiltered_value
@@ -557,6 +624,41 @@ sensor:
         return NAN;
       }
       return clamp(remaining / full * 100.0f, 0.0f, 100.0f);
+  # Litter poured in the last top-up or deep clean.
+  - platform: template
+    id: litter_added
+    name: "Litter Added"
+    icon: "mdi:tray-arrow-down"
+    unit_of_measurement: "g"
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+    disabled_by_default: True
+  # What the empty box weighed when it last came back washed. Compare with
+  # the Empty Box Weight setting.
+  - platform: template
+    id: measured_box_weight
+    name: "Measured Box Weight"
+    icon: "mdi:scale"
+    entity_category: diagnostic
+    unit_of_measurement: "g"
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+    disabled_by_default: True
+  # What the bare board read the last time the box was off it, before the
+  # zero was corrected. Grows with temperature and cell creep; a jump means
+  # something is wedged under the board.
+  - platform: template
+    id: zero_drift
+    name: "Zero Drift"
+    icon: "mdi:scale-off"
+    entity_category: diagnostic
+    unit_of_measurement: "g"
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+    disabled_by_default: True
   - platform: template
     name: "Visits since clean"
     id: visits
@@ -650,6 +752,26 @@ text_sensor:
     icon: "mdi:state-machine"
     entity_category: diagnostic
     update_interval: never
+  # normal / lifted (monitor in the air) / off (bare board) / empty (washed
+  # box back, nothing in it yet)
+  - platform: template
+    id: box_state
+    name: "Box State"
+    icon: "mdi:tray"
+    entity_category: diagnostic
+    update_interval: never
+
+event:
+  # Fired once per maintenance event, after the counters are updated.
+  - platform: template
+    id: maintenance_event
+    name: "Maintenance"
+    icon: "mdi:broom"
+    event_types:
+      - scoop
+      - top_up
+      - deep_clean
+      - lifted
 
 number:
   # Interval in days after which the litter should be changed.
@@ -706,6 +828,8 @@ number:
     mode: box
     initial_value: "0"
     restore_value: True
+    on_value:
+      - script.execute: configure_box_monitor
   # What "100%" means for the litter level. 0 leaves that sensor unknown.
   - platform: template
     name: "Full Litter Weight"
@@ -742,90 +866,9 @@ binary_sensor:
       - delayed_off:
           seconds: ${activity_off_delay}
     on_press:
-      - lambda: !lambda |-
-          id(event_start) = id(homeassistant_time).now().timestamp;
-          get_analyzer().init(id(cat_weights), 5);
-          get_weight_buf().reset();
-          get_analyzer().attach_buffer(&get_weight_buf());
-          get_sample_idx() = 0;
-          ESP_LOGD("SA", "Activity start, analyzer reset");
+      - script.execute: begin_event
     on_release:
-      - lambda: !lambda |-
-          time_t now = id(homeassistant_time).now().timestamp;
-          int duration = now - id(event_start);
-          int samples = get_sample_idx();
-          id(is_cat_event) = false;
-
-          if (duration >= 10 && samples >= 100) {
-            const StateResult &result = get_analyzer().finalize(
-                get_weight_buf(), id(cat_weights), 5,
-                id(elimination_std_dev_threshold).state);
-
-            ESP_LOGI("SA", "Event: cat=%.0fg waste=%.0fg type=%s cat_idx=%d periods=%d dur=%ds",
-                     result.cat_weight, result.waste_weight,
-                     elimination_type_str(result.elimination_type),
-                     result.detected_cat, result.period_count, duration);
-
-            id(elimination_type_sensor).publish_state(
-                elimination_type_str(result.elimination_type));
-            id(current_cat_weight).publish_state(result.cat_weight / 1000.0f);
-            id(event_duration_sensor).publish_state(duration);
-
-            // Publish std dev of the single elimination period
-            if (result.period_count > 0) {
-              for (int i = 0; i < result.period_count; i++) {
-                if (result.periods[i].state == AnalyzerState::ELIMINATING &&
-                    result.periods[i].std_dev >= 0.0f) {
-                  id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
-                  break;
-                }
-              }
-            }
-
-            if (result.detected_cat >= 0) {
-              id(is_cat_event) = true;
-              int ci = result.detected_cat;
-              if (result.cat_weight > 0.0f) {
-                id(cat_weights)[ci] = result.cat_weight / 1000.0f;
-              }
-              id(cat_daily_visits)[ci]++;
-              if (result.elimination_type == EliminationType::URINATION ||
-                  result.elimination_type == EliminationType::BOTH) {
-                id(cat_daily_pees)[ci]++;
-              }
-              if (result.elimination_type == EliminationType::DEFECATION ||
-                  result.elimination_type == EliminationType::BOTH) {
-                id(cat_daily_poops)[ci]++;
-              }
-              ESP_LOGI("CAT", "Cat %d: %.2fkg, daily visits: %d",
-                       ci + 1, id(cat_weights)[ci], id(cat_daily_visits)[ci]);
-            }
-
-            float new_waste = id(weight_value).state;
-            if (new_waste > 0.0f) {
-              id(waste_weight).publish_state(
-                  id(waste_weight).state + new_waste * 1000.0f);
-            }
-            id(visits).publish_state(id(visits).state + 1);
-          } else {
-            ESP_LOGD("SA", "Short event skipped: %ds, %d samples", duration, samples);
-          }
-          id(state_machine_state).publish_state("empty");
-      - lambda: !lambda |- # Clean event detection
-          if (id(is_cat_event)) {
-            return;
-          }
-          auto now = id(homeassistant_time).now().timestamp;
-          if (now - id(event_start) < ${min_clean_event_duration}) {
-            return;
-          }
-          if (id(weight_value).state > ${min_clean_event_weight} / 1000.0f) {
-            return;
-          }
-          id(litter_weight).publish_state(id(hx711_raw_value).state - (id(litterbox_weight).state/1000.0));
-          id(waste_weight).publish_state(0.0);
-          id(visits).publish_state(0);
-      - script.execute: reset_event
+      - script.execute: end_event
   - platform: template
     device_class: vibration
     entity_category: diagnostic
@@ -890,7 +933,229 @@ button:
                 known_weight_kg: !lambda return id(calibration_known_weight).state / 1000.0;
 
 script:
-  # Reset all event-related state
+  # Push the box thresholds into the tracker. Runs at boot and whenever the
+  # Empty Box Weight setting changes.
+  - id: configure_box_monitor
+    then:
+      - lambda: !lambda |-
+          BoxConfig cfg;
+          float box_g = id(litterbox_weight).state;
+          cfg.box_g = std::isnan(box_g) ? 0.0f : box_g;
+          cfg.off_tol_g = ${box_off_tolerance};
+          cfg.empty_tol_g = ${box_empty_tolerance};
+          cfg.lift_g = ${monitor_lift_threshold};
+          cfg.return_tol_g = ${lift_return_tolerance};
+          cfg.top_up_min_g = ${min_top_up_weight};
+          cfg.scoop_min_g = -(${min_clean_event_weight});
+          cfg.scoop_min_s = ${min_clean_event_duration};
+          cfg.settle_s = ${top_up_settle_time};
+          get_box_monitor().configure(cfg);
+
+  # Start recording: activity just began, or the previous event closed while
+  # the scale was still busy.
+  - id: begin_event
+    then:
+      - lambda: !lambda |-
+          if (id(event_open)) return;
+          id(event_open) = true;
+          id(event_start) = id(homeassistant_time).now().timestamp;
+          get_analyzer().init(id(cat_weights), 5);
+          get_weight_buf().reset();
+          get_analyzer().attach_buffer(&get_weight_buf());
+          get_sample_idx() = 0;
+          get_box_monitor().begin_event((id(tare_value) + id(auto_tare_value)) * 1000.0f);
+          ESP_LOGD("SA", "Event start, analyzer reset");
+
+  # Close the event: score the visit, work out what happened to the box,
+  # then tare. Runs when activity drops, on the inactivity timeout, and when
+  # fresh litter has settled. Order matters: everything is judged against
+  # the old tare, and the tare moves last, if at all.
+  - id: end_event
+    then:
+      - script.stop: event_timeout
+      - lambda: !lambda |-
+          if (!id(event_open)) return;
+          id(event_open) = false;
+
+          time_t now = id(homeassistant_time).now().timestamp;
+          int duration = now - id(event_start);
+          int samples = get_sample_idx();
+          bool long_enough = duration >= 10 && samples >= 100;
+          // Where the scale sits now, relative to the start of the event.
+          float end_tared_kg = id(weight_value).state;
+          // A cat was already scored in the event this one continues.
+          bool continued = id(suppress_visit);
+
+          const StateResult *visit = nullptr;
+          if (long_enough) {
+            visit = &get_analyzer().finalize(
+                get_weight_buf(), id(cat_weights), 5,
+                id(elimination_std_dev_threshold).state);
+            ESP_LOGI("SA", "Event: cat=%.0fg waste=%.0fg type=%s cat_idx=%d periods=%d dur=%ds",
+                     visit->cat_weight, visit->waste_weight,
+                     elimination_type_str(visit->elimination_type),
+                     visit->detected_cat, visit->period_count, duration);
+          } else {
+            ESP_LOGD("SA", "Short event skipped: %ds, %d samples", duration, samples);
+          }
+          bool cat_event = visit != nullptr && visit->detected_cat >= 0;
+          id(state_machine_state).publish_state("empty");
+
+          // What happened to the box, judged on the absolute level. A
+          // continued event is a cat leaving, never a scoop.
+          const BoxEvent &box = get_box_monitor().finalize(duration, cat_event || continued);
+          float zero_g = box.zero_valid ? box.zero_error_g : 0.0f;
+          float zero_kg = zero_g / 1000.0f;
+          float level_kg = (box.level_g - zero_g) / 1000.0f;
+          float box_kg = id(litterbox_weight).state / 1000.0f;
+          ESP_LOGI("BOX", "Event: %s level=%.0fg added=%.0fg box=%.0fg zero=%.0fg%s absent=%d",
+                   box_event_str(box.kind), box.level_g, box.litter_added_g,
+                   box.box_measured_g, zero_g, box.zero_valid ? "" : " (unchecked)",
+                   (int) box.absent);
+
+          // Maintenance outranks the visit analysis: a bag that happens to
+          // weigh what a cat does matches the cat by weight, but it went
+          // inert, and that is the stronger evidence.
+          if (visit != nullptr && box.kind == BoxEventKind::NONE) {
+            const StateResult &result = *visit;
+            id(elimination_type_sensor).publish_state(
+                elimination_type_str(result.elimination_type));
+            id(current_cat_weight).publish_state(result.cat_weight / 1000.0f);
+            id(event_duration_sensor).publish_state(duration);
+
+            // Publish std dev of the single elimination period
+            for (int i = 0; i < result.period_count; i++) {
+              if (result.periods[i].state == AnalyzerState::ELIMINATING &&
+                  result.periods[i].std_dev >= 0.0f) {
+                id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
+                break;
+              }
+            }
+
+            if (cat_event) {
+              int ci = result.detected_cat;
+              if (result.cat_weight > 0.0f) {
+                id(cat_weights)[ci] = result.cat_weight / 1000.0f;
+              }
+              if (!continued) {
+                id(cat_daily_visits)[ci]++;
+                if (result.elimination_type == EliminationType::URINATION ||
+                    result.elimination_type == EliminationType::BOTH) {
+                  id(cat_daily_pees)[ci]++;
+                }
+                if (result.elimination_type == EliminationType::DEFECATION ||
+                    result.elimination_type == EliminationType::BOTH) {
+                  id(cat_daily_poops)[ci]++;
+                }
+              }
+              ESP_LOGI("CAT", "Cat %d: %.2fkg, daily visits: %d",
+                       ci + 1, id(cat_weights)[ci], id(cat_daily_visits)[ci]);
+            }
+          } else if (cat_event) {
+            ESP_LOGI("SA", "Cat match dropped: the event was a %s", box_event_str(box.kind));
+          }
+
+          switch (box.kind) {
+            case BoxEventKind::DEEP_CLEAN:
+              id(litter_weight).publish_state(level_kg - box_kg);
+              id(litter_added).publish_state(box.litter_added_g);
+              id(measured_box_weight).publish_state(box.box_measured_g - zero_g);
+              id(waste_weight).publish_state(0);
+              id(visits).publish_state(0);
+              // Unsynced clock reads as seconds-since-boot; stamping that
+              // would put the due date fifty years in the past.
+              if (id(homeassistant_time).now().is_valid()) {
+                id(litter_changed_date) = now;
+                id(litter_life_left).update();
+                id(deep_clean_due).update();
+              } else {
+                ESP_LOGW("BOX", "Deep clean not stamped: clock not synced yet");
+              }
+              break;
+            case BoxEventKind::TOP_UP:
+              id(litter_weight).publish_state(level_kg - box_kg);
+              id(litter_added).publish_state(box.litter_added_g);
+              // Scooped out, then topped up, in one go.
+              if (box.scooped) {
+                id(waste_weight).publish_state(0);
+                id(visits).publish_state(0);
+                id(maintenance_event).trigger("scoop");
+              }
+              break;
+            case BoxEventKind::SCOOP:
+              id(litter_weight).publish_state(level_kg - box_kg);
+              id(waste_weight).publish_state(0);
+              id(visits).publish_state(0);
+              break;
+            case BoxEventKind::LIFTED:
+            case BoxEventKind::NONE:
+              break;
+          }
+
+          // A visit ends with whatever the cat left behind on the scale.
+          // Unless the cat is the thing still on the scale: the inactivity
+          // timeout fires when a cat sits dead still, and taring then would
+          // bake its weight into the litter. Hold the tare and let the next
+          // event (the cat leaving) add the waste. Once only: something that
+          // holds this still through two timeouts is not a cat.
+          bool cat_inside = false;
+          if (box.kind == BoxEventKind::NONE && long_enough) {
+            float min_cat_kg = 0.0f;
+            for (int i = 0; i < 5; i++) {
+              float w = id(cat_weights)[i];
+              if (w > 0.0f && (min_cat_kg == 0.0f || w < min_cat_kg)) min_cat_kg = w;
+            }
+            bool heavy = min_cat_kg > 0.0f && end_tared_kg > 0.5f * min_cat_kg;
+            if (heavy && !continued && id(activity_detected).state) {
+              cat_inside = true;
+              ESP_LOGI("SA", "%.2f kg still on the scale, waiting for it to leave", end_tared_kg);
+            } else if (heavy) {
+              ESP_LOGW("SA", "%.2f kg sat through two timeouts; taring without counting waste", end_tared_kg);
+            } else {
+              if (end_tared_kg > 0.0f) {
+                id(waste_weight).publish_state(id(waste_weight).state + end_tared_kg * 1000.0f);
+              }
+              if (!continued) id(visits).publish_state(id(visits).state + 1);
+            }
+          }
+
+          // The bare board is the reference the calibration was taken on.
+          // Whatever it reads now is drift; fold it into the calibration so
+          // absolute readings stay honest across seasons.
+          if (box.zero_valid) {
+            id(calibration_tare) += zero_kg * id(calibration_coefficient);
+            id(zero_drift).publish_state(zero_g);
+            ESP_LOGI("BOX", "Zero corrected by %.0f g", zero_g);
+          }
+
+          if (box.absent) {
+            // Whatever comes back gets judged against the level before the
+            // lift, so a scoop split across two events keeps its delta.
+            id(tare_value) -= zero_kg;
+            id(suppress_visit) = false;
+            ESP_LOGI("BOX", "Box away, tare held");
+          } else if (cat_inside) {
+            id(suppress_visit) = true;
+          } else {
+            id(tare_value) = id(hx711_raw_value).state - zero_kg;
+            id(auto_tare_value) = 0;
+            id(suppress_visit) = false;
+          }
+
+          id(cat_detected).publish_state(false);
+          id(current_cat_weight).publish_state(0);
+          id(event_start) = 0;
+          if (box.kind != BoxEventKind::NONE) {
+            id(maintenance_event).trigger(box_event_str(box.kind));
+          }
+      # Closed by the timeout or by settled litter: the scale is still busy.
+      - if:
+          condition:
+            binary_sensor.is_on: activity_detected
+          then:
+            - script.execute: begin_event
+
+  # Manual reset (Reset Clean button): drop any open event and tare here.
   - id: reset_event
     then:
       - logger.log:
@@ -898,11 +1163,12 @@ script:
           format: "Resetting event state"
       - script.stop: event_timeout
       - lambda: !lambda |-
+          id(event_open) = false;
+          id(suppress_visit) = false;
           id(cat_detected).publish_state(false);
           id(current_cat_weight).publish_state(0);
           id(tare_value) = id(hx711_raw_value).state;
           id(auto_tare_value) = 0;
-          id(is_cat_event) = false;
           id(event_start) = 0;
   # Begin a countdown for event timeout
   - id: event_timeout
@@ -912,7 +1178,7 @@ script:
       - logger.log:
           level: INFO
           format: "Event timeout after ${event_timeout}s of inactivity"
-      - script.execute: reset_event
+      - script.execute: end_event
   # Calibration related scripts
   - id: calibrate_tare
     then:
