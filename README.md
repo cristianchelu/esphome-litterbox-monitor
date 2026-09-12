@@ -51,8 +51,10 @@ buttons, and actions.
 
 ### ESP32
 
-- Use a variant with a **hardware FPU**: the classic ESP32 (what the
-  config targets and the development build runs) or the ESP32-S3.
+- Use a variant with a **hardware FPU**: the ESP32-S3 (what the config
+  targets — the development build runs on an ESP32-S3 Super Mini) or the
+  classic ESP32. For a classic ESP32 set `board: esp32dev`, drop
+  `flash_size`, and pick pins that exist on it.
 - PoopSense leans on float math — per-sample filtering at 10 Hz and
   standard-deviation crunching at 0.1 g precision after every visit — so
   variants that emulate floats in software (S2, C3, C6) are untested.
@@ -81,23 +83,28 @@ for wiring the load cells to the HX711 and mounting them under the baseboard.
 
 Wire the HX711 to the ESP32. The configuration defaults to:
 
-| HX711 pin | ESP32 pin |
+| HX711 pin | ESP32-S3 pin |
 |---|---|
-| `DOUT` / `DT` | `GPIO16` |
-| `SCK` / `CLK` | `GPIO4` |
+| `DOUT` / `DT` | `GPIO13` |
+| `SCK` / `CLK` | `GPIO12` |
 
 You can use different pins — just update the `hx711` sensor section of the
 YAML to match your wiring.
 
 ## Firmware Setup
 
-1. Clone this repo (or copy both [`litterbox-monitor.yaml`](litterbox-monitor.yaml)
-   and [`state_analyzer.h`](state_analyzer.h) into the same directory — both
-   files are required).
+1. Clone this repo (or copy [`litterbox-monitor.yaml`](litterbox-monitor.yaml),
+   [`state_analyzer.h`](state_analyzer.h) and [`visit_blob.h`](visit_blob.h)
+   into the same directory — all three are required).
 
 2. Create a `secrets.yaml` next to them defining:
    `wifi_ssid`, `wifi_password`, `litterbox_api_key`, `litterbox_ota_password`,
-   and `litterbox_ap_password`.
+   `litterbox_ap_password`, and `mqtt_broker` (host or IP of an MQTT broker).
+   Home Assistant talks to the device over the native API as before; the
+   broker only receives the visit record — every sample the analyzer saw,
+   plus its verdict — so a visit can be replayed off the device. The
+   `mqtt:` block carries placeholder credentials (`litterbox`/`litterbox`);
+   change them to whatever your broker expects.
 
 3. Edit the `substitutions` block at the top of the YAML:
 

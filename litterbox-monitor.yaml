@@ -75,6 +75,10 @@ substitutions:
   # top-up early and is what a rise must do to count as one.
   top_up_settle_time: "30" # seconds
 
+  # Root of the MQTT topics this device publishes under. Only the visit
+  # record goes over MQTT; everything else stays on the native API.
+  mqtt_topic: "cathealth/litterbox"
+
 globals:
   ## General state
 
@@ -172,9 +176,10 @@ esphome:
   comment: Smart Litterbox
   includes:
     - state_analyzer.h
+    - visit_blob.h
   project:
     name: "CristianChelu.LitterboxMonitor"
-    version: "esp32.hx711"
+    version: "esp32s3.hx711"
   on_boot:
     priority: -100
     then:
@@ -184,8 +189,11 @@ esphome:
       # empty by definition, so say so rather than leaving it unknown.
       - lambda: 'id(state_machine_state).publish_state("empty");'
 
+# ESP32-S3 Super Mini (HW-747, ESP32-S3FH4R2): 4 MB flash, 2 MB quad PSRAM
+# left disabled — the sample buffer fits comfortably in the 512 KB SRAM.
 esp32:
-  board: esp32dev
+  board: esp32-s3-devkitc-1
+  flash_size: 4MB
   framework:
     type: esp-idf
 
@@ -217,6 +225,30 @@ api:
         - script.execute:
             id: calibrate_weight
             known_weight_kg: !lambda return known_weight_kg;
+
+# Carries only the visit record (see visit_blob.h). A null topic prefix
+# keeps every entity off MQTT — including the 10 Hz raw sensor — and turns
+# off the default birth/will, so presence is set explicitly. The broker is
+# a side channel: losing it must not reboot the device out from under the
+# native API, hence no reboot timeout.
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_broker
+  username: litterbox
+  password: litterbox
+  topic_prefix: null
+  discovery: false
+  discover_ip: false
+  log_topic: null
+  reboot_timeout: 0s
+  birth_message:
+    topic: ${mqtt_topic}/status
+    payload: online
+    retain: true
+  will_message:
+    topic: ${mqtt_topic}/status
+    payload: offline
+    retain: true
 
 ota:
   - platform: esphome
@@ -445,8 +477,8 @@ sensor:
   - platform: hx711
     id: hx711_analog_value
     name: "Analog sensor value"
-    dout_pin: GPIO16
-    clk_pin: GPIO4
+    dout_pin: GPIO13
+    clk_pin: GPIO12
     gain: 128
     update_interval: 100ms
     entity_category: diagnostic
@@ -494,14 +526,25 @@ sensor:
           if (!id(event_open)) return;
           float tared_g = (x - id(tare_value) - id(auto_tare_value)) * 1000.0f;
           static AnalyzerState prev_state = AnalyzerState::EMPTY;
-          get_analyzer().process_sample(tared_g, get_sample_idx());
+          // The buffer is the record of the visit, so the state machine
+          // runs on what the buffer holds (1 g, or 0.1 g while occupied),
+          // not on the raw float. Replaying the buffer then reproduces it.
+          VisitRecorder &rec = get_visit_recorder();
+          rec.sample(get_sample_idx(), millis());
+          float seen_g = get_weight_buf().push(tared_g);
+          get_analyzer().process_sample(seen_g, get_sample_idx());
           AnalyzerState cur = get_analyzer().current_state();
           if (cur != prev_state) {
             id(state_machine_state).publish_state(analyzer_state_str(cur));
             prev_state = cur;
           }
-          get_weight_buf().push(tared_g);
           get_sample_idx()++;
+
+          // Stream the record out as it grows; nothing is left to burst at
+          // the end, and a long sit never has to fit in one publish.
+          if (rec.chunk_due(get_weight_buf())) {
+            id(publish_visit_chunk).execute();
+          }
 
           // Fresh litter sitting dead still doesn't need to wait out the
           // inactivity timeout (which only runs because the added mass keeps
@@ -951,6 +994,22 @@ script:
           cfg.settle_s = ${top_up_settle_time};
           get_box_monitor().configure(cfg);
 
+  # Send whatever of the visit record is pending. Runs from the sample path
+  # every 2000 samples (one chunk) and from end_event for the tail.
+  - id: publish_visit_chunk
+    then:
+      - lambda: !lambda |-
+          static std::string payload;
+          VisitRecorder &rec = get_visit_recorder();
+          while (rec.next_chunk(get_weight_buf(), payload)) {
+            if (!id(mqtt_client).publish("${mqtt_topic}/visit/chunk", payload, 1, false)) {
+              rec.chunk_failed();
+              ESP_LOGW("BLOB", "Chunk publish refused (%u bytes)", (unsigned) payload.size());
+            }
+          }
+          payload.clear();
+          payload.shrink_to_fit();
+
   # Start recording: activity just began, or the previous event closed while
   # the scale was still busy.
   - id: begin_event
@@ -963,6 +1022,7 @@ script:
           get_weight_buf().reset();
           get_analyzer().attach_buffer(&get_weight_buf());
           get_sample_idx() = 0;
+          get_visit_recorder().begin(id(event_start));
           get_box_monitor().begin_event((id(tare_value) + id(auto_tare_value)) * 1000.0f);
           ESP_LOGD("SA", "Event start, analyzer reset");
 
@@ -985,6 +1045,20 @@ script:
           float end_tared_kg = id(weight_value).state;
           // A cat was already scored in the event this one continues.
           bool continued = id(suppress_visit);
+
+          // What the analysis is about to run under. Taken now because
+          // finalize updates the cat weights, and the record must carry the
+          // values the verdict was made with.
+          static BlobConfig blob_cfg;
+          for (int i = 0; i < 5; i++) blob_cfg.cat_weights_kg[i] = id(cat_weights)[i];
+          blob_cfg.sd_threshold_g = id(elimination_std_dev_threshold).state;
+          blob_cfg.tare_kg = id(tare_value);
+          blob_cfg.auto_tare_kg = id(auto_tare_value);
+          blob_cfg.spike_threshold_kg = ${spike_threshold};
+          blob_cfg.vibration_threshold_kg = ${vibration_threshold};
+          blob_cfg.activity_off_s = ${activity_off_delay};
+          blob_cfg.event_timeout_s = ${event_timeout};
+          blob_cfg.box = get_box_monitor().config();
 
           const StateResult *visit = nullptr;
           if (long_enough) {
@@ -1144,10 +1218,38 @@ script:
 
           id(cat_detected).publish_state(false);
           id(current_cat_weight).publish_state(0);
-          id(event_start) = 0;
           if (box.kind != BoxEventKind::NONE) {
             id(maintenance_event).trigger(box_event_str(box.kind));
           }
+
+          // Ship the record: whatever the buffer still holds, then the end
+          // record that decodes it and carries the verdict. Retained, so a
+          // hub that was down sees the last visit and knows to ask for it.
+          id(publish_visit_chunk).execute();
+          VisitRecorder &rec = get_visit_recorder();
+          static std::string payload;
+          BlobEnd blob_end;
+          blob_end.id = id(event_start);
+          blob_end.ended = now;
+          blob_end.clock_valid = id(homeassistant_time).now().is_valid();
+          blob_end.duration_s = duration;
+          blob_end.samples = samples;
+          blob_end.long_enough = long_enough;
+          blob_end.continued = continued;
+          blob_end.visit = visit;
+          blob_end.box = &box;
+          blob_end.project = ESPHOME_PROJECT_NAME;
+          blob_end.version = ESPHOME_PROJECT_VERSION;
+          rec.end_record(get_weight_buf(), blob_end, blob_cfg, payload);
+          if (!id(mqtt_client).publish("${mqtt_topic}/visit/last", payload, 1, true)) {
+            ESP_LOGW("BLOB", "End record publish refused (%u bytes)", (unsigned) payload.size());
+          } else {
+            ESP_LOGI("BLOB", "Visit %lld: %d samples in %d chunks, end record %u bytes",
+                     (long long) blob_end.id, samples, rec.chunks(), (unsigned) payload.size());
+          }
+          payload.clear();
+          payload.shrink_to_fit();
+          id(event_start) = 0;
       # Closed by the timeout or by settled litter: the scale is still busy.
       - if:
           condition:
