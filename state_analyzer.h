@@ -13,7 +13,8 @@ static const int SA_MAX_PERIODS = 256;
 static const int SA_MOTION_HZ = 10;
 static const int SA_MAX_MOTION_WINDOWS = SA_MAX_SAMPLES / SA_MOTION_HZ;
 static const int SA_MAX_CATS = 5;
-static const int SA_MAX_ZONES = 32;
+/** Zones open on OCCUPIED entry/exit and on delta overflow; a fidgety visit needs room. */
+static const int SA_MAX_ZONES = 256;
 static const float SA_URINATION_STD_DEV_THRESHOLD_G = 4.0f;
 static const int16_t SA_SCALE_ABS = 1;    // 1g, identical to previous behavior
 static const int16_t SA_SCALE_DELTA = 10; // 0.1g, used during OCCUPIED/ELIMINATING
@@ -139,8 +140,13 @@ class Ring {
 //   Absolute zones (SA_SCALE_ABS=1):  int16_t(weight_g)          -- 1g precision
 //   Delta zones (SA_SCALE_DELTA=10):  int16_t((weight_g-base)*10) -- 0.1g precision
 //
-// Delta zones are opened at each OCCUPIED entry; absolute zones at GAP/ENTERING.
+// Delta zones are opened at each OCCUPIED entry; absolute zones at GAP/ENTERING,
+// and whenever a delta zone would overflow (a cat heavier than 3.2 kg leaving
+// mid-zone), so no stored sample is ever more than 0.5 g from what was read.
 // elimination_motion_metric() decodes per zone and applies TS median-RMS metric.
+//
+// The buffer is the record of the visit: the analyzer consumes what push()
+// returns, so the raw samples plus the zone table replay it exactly.
 class WeightBuffer {
  public:
   void reset() {
@@ -162,16 +168,49 @@ class WeightBuffer {
       zones_[current_zone_ = zone_count_++] = {count_, baseline_g, SA_SCALE_DELTA};
   }
 
-  void push(float weight_g) {
-    if (count_ >= SA_MAX_SAMPLES || current_zone_ < 0) return;
-    const ZoneEntry &z = zones_[current_zone_];
-    float val = weight_g - z.baseline_g;
-    if (z.scale != SA_SCALE_ABS) val *= z.scale;
-    samples_[count_++] = static_cast<int16_t>(
-        std::max(-32768.0f, std::min(32767.0f, val)));
+  /**
+   * Store a sample and return what it decodes back to — the value the state
+   * machine must consume so the buffer is an exact record of the visit.
+   * Once the buffer is full nothing is stored and the input passes through;
+   * the analyzer stops at MAX_SESSION samples anyway.
+   */
+  float push(float weight_g) {
+    if (count_ >= SA_MAX_SAMPLES || current_zone_ < 0) return weight_g;
+    const ZoneEntry *z = &zones_[current_zone_];
+    float val = encode_(weight_g, *z);
+    if (z->scale != SA_SCALE_ABS && (val > 32767.0f || val < -32768.0f)) {
+      // The zone table can be full, in which case the sample clamps below.
+      begin_absolute_zone();
+      z = &zones_[current_zone_];
+      val = encode_(weight_g, *z);
+    }
+    // Round, don't truncate: a decoded value re-encodes to the same code,
+    // so a replay that pushes decoded grams rebuilds this buffer exactly.
+    int16_t enc = static_cast<int16_t>(lroundf(std::max(-32768.0f, std::min(32767.0f, val))));
+    samples_[count_++] = enc;
+    return decode_(enc, *z);
+  }
+
+  /** Rebuild verbatim from a published record (raw codes plus zone table). */
+  void restore(const int16_t *samples, int n, const ZoneEntry *zones, int nz) {
+    count_ = std::min(n, SA_MAX_SAMPLES);
+    memcpy(samples_, samples, count_ * sizeof(int16_t));
+    zone_count_ = std::min(nz, SA_MAX_ZONES);
+    memcpy(zones_, zones, zone_count_ * sizeof(ZoneEntry));
+    current_zone_ = zone_count_ - 1;
   }
 
   int count() const { return count_; }
+  int zone_count() const { return zone_count_; }
+  const ZoneEntry &zone(int i) const { return zones_[i]; }
+  int16_t raw_sample(int idx) const { return samples_[idx]; }
+
+  /** Grams the analyzer saw for sample `idx`. */
+  float sample_to_grams(int idx) const {
+    const ZoneEntry *z = zone_for_index(idx);
+    if (!z || idx < 0 || idx >= count_) return 0.0f;
+    return decode_(samples_[idx], *z);
+  }
 
   /**
    * Motion metric for an ELIMINATING period — matches TS processEvent:
@@ -213,12 +252,16 @@ class WeightBuffer {
     return nullptr;
   }
 
-  float sample_to_grams(int idx) const {
-    const ZoneEntry *z = zone_for_index(idx);
-    if (!z || idx < 0 || idx >= count_) return 0.0f;
-    float enc = static_cast<float>(samples_[idx]);
-    if (z->scale == SA_SCALE_ABS) return enc;
-    return z->baseline_g + enc / static_cast<float>(z->scale);
+  static float encode_(float weight_g, const ZoneEntry &z) {
+    float val = weight_g - z.baseline_g;
+    if (z.scale != SA_SCALE_ABS) val *= z.scale;
+    return val;
+  }
+
+  static float decode_(int16_t enc, const ZoneEntry &z) {
+    float val = static_cast<float>(enc);
+    if (z.scale == SA_SCALE_ABS) return val;
+    return z.baseline_g + val / static_cast<float>(z.scale);
   }
 
   /** TS rmsAroundMean over decoded grams in [s, s+n) without a heap decode buffer. */
@@ -693,6 +736,7 @@ struct BoxEvent {
 class BoxMonitor {
  public:
   void configure(const BoxConfig &c) { cfg_ = c; }
+  const BoxConfig &config() const { return cfg_; }
 
   /** `base_g`: absolute level the event is measured against (the last tare). */
   void begin_event(float base_g) {
