@@ -2,33 +2,35 @@
 // Visit blob: what the device publishes so a visit can be replayed
 // off-device exactly as the state machine saw it.
 //
-// Two messages per visit, both JSON:
+// One message per visit on visit/last (QoS 0, retained), binary:
 //
-//   visit/chunk  (QoS 1, not retained) — a slice of the WeightBuffer, sent
-//                every CHUNK_SAMPLES during the visit and once more for the
-//                tail at the end:
-//                {"id","seq","first","n","s":[int16...]}
+//   "LBV1"  u32 n  int16 x n (little-endian)  JSON trailer
 //
-//   visit/last   (QoS 1, retained) — the end record: identity, timing, the
-//                zone table that decodes the chunks, the device verdict and
-//                the configuration it ran under. Published for short events
-//                too (visit null), so the hub sees what the device skipped.
+// The samples are the WeightBuffer's storage verbatim — the buffer is the
+// frame, so nothing is copied to ship it. The trailer follows the last
+// sample: identity, timing, the zone table that decodes the codes, the
+// device verdict and the configuration it ran under. Published for short
+// events too (visit null), so the hub sees what the device skipped.
 //
-// Replay: rebuild the buffer from the raw samples and zones, then feed
+// Replay: rebuild the buffer from the raw codes and zones, then feed
 // sample_to_grams(i) to process_sample(i) in order. The zone for sample i
 // is opened by process_sample(i-1), same on device and replay. Drops list
 // (index, gap_ms) for every accepted sample that arrived more than
 // DROP_GAP_MS after the previous one; the analyzer is index-based, so that
 // is all replay needs to know about time.
 //
+// Hub side: n = readUInt32LE(4); samples = Int16Array at byte 8;
+// meta = JSON.parse(bytes from 8 + 2n).
+//
 // Pure string building: no ESPHome or MQTT symbols, so the replay harness
 // can share the format.
 #include "state_analyzer.h"
 
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
-#include <string>
 
 struct SampleDrop {
   int index;        // the sample that arrived late
@@ -64,15 +66,11 @@ struct BlobEnd {
 
 class VisitRecorder {
  public:
-  static const int CHUNK_SAMPLES = 2000;
   static const int MAX_DROPS = 256;
   static const uint32_t DROP_GAP_MS = 150;
 
   void begin(time_t id) {
     id_ = id;
-    sent_ = 0;
-    seq_ = 0;
-    failed_ = 0;
     drop_count_ = 0;
     drops_overflow_ = false;
     last_ms_ = 0;
@@ -93,121 +91,103 @@ class VisitRecorder {
     last_ms_ = now_ms;
   }
 
-  bool chunk_due(const WeightBuffer &buf) const { return buf.count() - sent_ >= CHUNK_SAMPLES; }
-
-  /** Build the next chunk into `out`; false when nothing is pending. */
-  bool next_chunk(const WeightBuffer &buf, std::string &out) {
-    int n = buf.count() - sent_;
-    if (n <= 0) return false;
-    if (n > CHUNK_SAMPLES) n = CHUNK_SAMPLES;
-    out.clear();
-    out.reserve(64 + n * 7);
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "{\"id\":%lld,\"seq\":%d,\"first\":%d,\"n\":%d,\"s\":[",
-             static_cast<long long>(id_), seq_, sent_, n);
-    out += tmp;
-    for (int i = 0; i < n; i++) {
-      snprintf(tmp, sizeof(tmp), i ? ",%d" : "%d", static_cast<int>(buf.raw_sample(sent_ + i)));
-      out += tmp;
+  /**
+   * Write the header and trailer around the samples already in the buffer.
+   * Returns the frame length in bytes; the frame starts at &buf.frame().
+   */
+  size_t finish(WeightBuffer &buf, const BlobEnd &e, const BlobConfig &c) const {
+    VisitFrame &f = buf.frame();
+    memcpy(f.magic, "LBV1", 4);
+    f.count = static_cast<uint32_t>(buf.count());
+    char *base = reinterpret_cast<char *>(&f);
+    Cursor w{base + 8 + 2 * buf.count(), base + sizeof(VisitFrame)};
+    trailer_(w, buf, e, c);
+    if (w.overflow) {
+      // Cannot happen with SA_FRAME_TAIL sized for full tables; keep the
+      // frame parseable rather than ship a torn trailer.
+      w = Cursor{base + 8 + 2 * buf.count(), base + sizeof(VisitFrame)};
+      w.printf("{\"id\":%lld,\"stored\":%d,\"truncated\":true}", static_cast<long long>(e.id), buf.count());
     }
-    out += "]}";
-    sent_ += n;
-    seq_++;
-    return true;
+    return static_cast<size_t>(w.p - base);
   }
 
-  /** A chunk publish that the client refused; counted into the end record. */
-  void chunk_failed() { failed_++; }
-  int chunks() const { return seq_; }
-
-  void end_record(const WeightBuffer &buf, const BlobEnd &e, const BlobConfig &c, std::string &out) const {
-    out.clear();
-    out.reserve(2048 + buf.zone_count() * 40 + drop_count_ * 16 +
-                (e.visit ? e.visit->period_count * 40 : 0));
-    char tmp[512];
-
-    snprintf(tmp, sizeof(tmp),
-             "{\"id\":%lld,\"ended\":%lld,\"clock_valid\":%s,\"duration\":%d,"
-             "\"samples\":%d,\"stored\":%d,\"chunks\":%d,\"chunks_failed\":%d,"
-             "\"long_enough\":%s,\"continued\":%s,",
-             static_cast<long long>(e.id), static_cast<long long>(e.ended), b(e.clock_valid),
-             e.duration_s, e.samples, buf.count(), seq_, failed_, b(e.long_enough), b(e.continued));
-    out += tmp;
-
-    out += "\"drops\":[";
-    for (int i = 0; i < drop_count_; i++) {
-      snprintf(tmp, sizeof(tmp), i ? ",[%d,%u]" : "[%d,%u]", drops_[i].index,
-               static_cast<unsigned>(drops_[i].gap_ms));
-      out += tmp;
+ private:
+  /** Bounded writer over the tail of the frame. */
+  struct Cursor {
+    char *p;
+    const char *end;
+    bool overflow = false;
+    void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3))) {
+      if (overflow) return;
+      va_list ap;
+      va_start(ap, fmt);
+      int n = vsnprintf(p, end - p, fmt, ap);
+      va_end(ap);
+      if (n < 0 || n >= end - p) {
+        overflow = true;
+        return;
+      }
+      p += n;
     }
-    snprintf(tmp, sizeof(tmp), "],\"drops_overflow\":%s,", b(drops_overflow_));
-    out += tmp;
+  };
 
-    out += "\"zones\":[";
+  static const char *b(bool v) { return v ? "true" : "false"; }
+
+  void trailer_(Cursor &w, const WeightBuffer &buf, const BlobEnd &e, const BlobConfig &c) const {
+    w.printf("{\"id\":%lld,\"ended\":%lld,\"clock_valid\":%s,\"duration\":%d,"
+             "\"samples\":%d,\"stored\":%d,\"long_enough\":%s,\"continued\":%s,",
+             static_cast<long long>(e.id), static_cast<long long>(e.ended), b(e.clock_valid),
+             e.duration_s, e.samples, buf.count(), b(e.long_enough), b(e.continued));
+
+    w.printf("\"drops\":[");
+    for (int i = 0; i < drop_count_; i++)
+      w.printf(i ? ",[%d,%u]" : "[%d,%u]", drops_[i].index, static_cast<unsigned>(drops_[i].gap_ms));
+    w.printf("],\"drops_overflow\":%s,", b(drops_overflow_));
+
+    w.printf("\"zones\":[");
     for (int i = 0; i < buf.zone_count(); i++) {
       const ZoneEntry &z = buf.zone(i);
-      snprintf(tmp, sizeof(tmp), i ? ",[%d,%.9g,%d]" : "[%d,%.9g,%d]", z.start, z.baseline_g,
-               static_cast<int>(z.scale));
-      out += tmp;
+      w.printf(i ? ",[%d,%.9g,%d]" : "[%d,%.9g,%d]", z.start, z.baseline_g, static_cast<int>(z.scale));
     }
-    out += "],";
+    w.printf("],");
 
     if (e.visit) {
       const StateResult &v = *e.visit;
-      snprintf(tmp, sizeof(tmp),
-               "\"visit\":{\"cat_weight\":%.9g,\"waste_weight\":%.9g,\"type\":\"%s\",\"cat\":%d,"
+      w.printf("\"visit\":{\"cat_weight\":%.9g,\"waste_weight\":%.9g,\"type\":\"%s\",\"cat\":%d,"
                "\"periods\":[",
                v.cat_weight, v.waste_weight, elimination_type_str(v.elimination_type), v.detected_cat);
-      out += tmp;
       for (int i = 0; i < v.period_count; i++) {
         const StatePeriod &p = v.periods[i];
-        snprintf(tmp, sizeof(tmp), i ? ",[\"%s\",%d,%d,%.9g]" : "[\"%s\",%d,%d,%.9g]",
-                 analyzer_state_str(p.state), p.start, p.end, p.std_dev);
-        out += tmp;
+        w.printf(i ? ",[\"%s\",%d,%d,%.9g]" : "[\"%s\",%d,%d,%.9g]", analyzer_state_str(p.state), p.start,
+                 p.end, p.std_dev);
       }
-      out += "]},";
+      w.printf("]},");
     } else {
-      out += "\"visit\":null,";
+      w.printf("\"visit\":null,");
     }
 
     const BoxEvent &bx = *e.box;
-    snprintf(tmp, sizeof(tmp),
-             "\"box\":{\"kind\":\"%s\",\"level\":%.9g,\"added\":%.9g,\"box\":%.9g,"
+    w.printf("\"box\":{\"kind\":\"%s\",\"level\":%.9g,\"added\":%.9g,\"box\":%.9g,"
              "\"zero_valid\":%s,\"zero\":%.9g,\"absent\":%s,\"scooped\":%s},",
-             box_event_str(bx.kind), bx.level_g, bx.litter_added_g, bx.box_measured_g,
-             b(bx.zero_valid), bx.zero_error_g, b(bx.absent), b(bx.scooped));
-    out += tmp;
+             box_event_str(bx.kind), bx.level_g, bx.litter_added_g, bx.box_measured_g, b(bx.zero_valid),
+             bx.zero_error_g, b(bx.absent), b(bx.scooped));
 
-    out += "\"config\":{\"cat_weights\":[";
-    for (int i = 0; i < SA_MAX_CATS; i++) {
-      snprintf(tmp, sizeof(tmp), i ? ",%.9g" : "%.9g", c.cat_weights_kg[i]);
-      out += tmp;
-    }
-    snprintf(tmp, sizeof(tmp),
-             "],\"sd_threshold\":%.9g,\"tare\":%.9g,\"auto_tare\":%.9g,\"spike\":%.9g,"
+    w.printf("\"config\":{\"cat_weights\":[");
+    for (int i = 0; i < SA_MAX_CATS; i++) w.printf(i ? ",%.9g" : "%.9g", c.cat_weights_kg[i]);
+    w.printf("],\"sd_threshold\":%.9g,\"tare\":%.9g,\"auto_tare\":%.9g,\"spike\":%.9g,"
              "\"vibration\":%.9g,\"activity_off\":%d,\"timeout\":%d,",
-             c.sd_threshold_g, c.tare_kg, c.auto_tare_kg, c.spike_threshold_kg,
-             c.vibration_threshold_kg, c.activity_off_s, c.event_timeout_s);
-    out += tmp;
-    snprintf(tmp, sizeof(tmp),
-             "\"box\":{\"box_g\":%.9g,\"off_tol\":%.9g,\"empty_tol\":%.9g,\"lift\":%.9g,"
+             c.sd_threshold_g, c.tare_kg, c.auto_tare_kg, c.spike_threshold_kg, c.vibration_threshold_kg,
+             c.activity_off_s, c.event_timeout_s);
+    w.printf("\"box\":{\"box_g\":%.9g,\"off_tol\":%.9g,\"empty_tol\":%.9g,\"lift\":%.9g,"
              "\"return_tol\":%.9g,\"top_up_min\":%.9g,\"scoop_min\":%.9g,\"scoop_min_s\":%d,"
              "\"settle_s\":%d}},",
              c.box.box_g, c.box.off_tol_g, c.box.empty_tol_g, c.box.lift_g, c.box.return_tol_g,
              c.box.top_up_min_g, c.box.scoop_min_g, c.box.scoop_min_s, c.box.settle_s);
-    out += tmp;
 
-    snprintf(tmp, sizeof(tmp), "\"fw\":{\"project\":\"%s\",\"version\":\"%s\"}}", e.project, e.version);
-    out += tmp;
+    w.printf("\"fw\":{\"project\":\"%s\",\"version\":\"%s\"}}", e.project, e.version);
   }
 
- private:
-  static const char *b(bool v) { return v ? "true" : "false"; }
-
   time_t id_ = 0;
-  int sent_ = 0;
-  int seq_ = 0;
-  int failed_ = 0;
   SampleDrop drops_[MAX_DROPS];
   int drop_count_ = 0;
   bool drops_overflow_ = false;

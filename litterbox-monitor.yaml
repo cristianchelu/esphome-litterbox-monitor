@@ -177,6 +177,7 @@ esphome:
   includes:
     - state_analyzer.h
     - visit_blob.h
+    - visit_store.h
   project:
     name: "CristianChelu.LitterboxMonitor"
     version: "esp32s3.hx711"
@@ -188,6 +189,12 @@ esphome:
       # unpublished until the first visit ended. With no event open it is
       # empty by definition, so say so rather than leaving it unknown.
       - lambda: 'id(state_machine_state).publish_state("empty");'
+      # Visit journal on flash; the shipper task it starts is the only thing
+      # that ever publishes a visit record.
+      - lambda: !lambda |-
+          get_visit_store().setup("visits", [](const char *data, size_t len) {
+            return id(mqtt_client).publish("${mqtt_topic}/visit/last", data, len, 0, true);
+          });
 
 # ESP32-S3 Super Mini (HW-747, ESP32-S3FH4R2): 4 MB flash, 2 MB quad PSRAM
 # left disabled — the sample buffer fits comfortably in the 512 KB SRAM.
@@ -196,6 +203,16 @@ esp32:
   flash_size: 4MB
   framework:
     type: esp-idf
+  # Visit journal (see visit_store.h): ~100 typical visits or 7 hour-long
+  # ones, held until the broker takes them. It comes out of the two OTA
+  # slots, 1.75 MB -> 1.5 MB each, still a third over the current binary.
+  # A changed partition table needs a serial flash (OTA never touches it)
+  # and moves NVS, so saved tare and cat weights start over once.
+  partitions:
+    - name: visits
+      type: data
+      subtype: undefined
+      size: 524288
 
 logger:
   level: INFO
@@ -241,6 +258,8 @@ mqtt:
   discover_ip: false
   log_topic: null
   reboot_timeout: 0s
+  on_connect:
+    - lambda: 'get_visit_store().kick();'
   birth_message:
     topic: ${mqtt_topic}/status
     payload: online
@@ -539,12 +558,6 @@ sensor:
             prev_state = cur;
           }
           get_sample_idx()++;
-
-          // Stream the record out as it grows; nothing is left to burst at
-          // the end, and a long sit never has to fit in one publish.
-          if (rec.chunk_due(get_weight_buf())) {
-            id(publish_visit_chunk).execute();
-          }
 
           // Fresh litter sitting dead still doesn't need to wait out the
           // inactivity timeout (which only runs because the added mass keeps
@@ -975,6 +988,14 @@ button:
                 id: calibrate_weight
                 known_weight_kg: !lambda return id(calibration_known_weight).state / 1000.0;
 
+# The journal keeps pace with the visit: whole 2 KB chunks of the frame go
+# to flash as they fill (every ~100 s), so end_event has almost nothing
+# left to write. Between visits the sectors ahead are kept blank.
+interval:
+  - interval: 20ms
+    then:
+      - lambda: 'get_visit_store().step(8 + 2 * get_weight_buf().count());'
+
 script:
   # Push the box thresholds into the tracker. Runs at boot and whenever the
   # Empty Box Weight setting changes.
@@ -994,22 +1015,6 @@ script:
           cfg.settle_s = ${top_up_settle_time};
           get_box_monitor().configure(cfg);
 
-  # Send whatever of the visit record is pending. Runs from the sample path
-  # every 2000 samples (one chunk) and from end_event for the tail.
-  - id: publish_visit_chunk
-    then:
-      - lambda: !lambda |-
-          static std::string payload;
-          VisitRecorder &rec = get_visit_recorder();
-          while (rec.next_chunk(get_weight_buf(), payload)) {
-            if (!id(mqtt_client).publish("${mqtt_topic}/visit/chunk", payload, 1, false)) {
-              rec.chunk_failed();
-              ESP_LOGW("BLOB", "Chunk publish refused (%u bytes)", (unsigned) payload.size());
-            }
-          }
-          payload.clear();
-          payload.shrink_to_fit();
-
   # Start recording: activity just began, or the previous event closed while
   # the scale was still busy.
   - id: begin_event
@@ -1023,6 +1028,8 @@ script:
           get_analyzer().attach_buffer(&get_weight_buf());
           get_sample_idx() = 0;
           get_visit_recorder().begin(id(event_start));
+          // Open the journal entry this visit will be written into as it happens.
+          get_visit_store().open(reinterpret_cast<const uint8_t *>(&get_weight_buf().frame()));
           get_box_monitor().begin_event((id(tare_value) + id(auto_tare_value)) * 1000.0f);
           ESP_LOGD("SA", "Event start, analyzer reset");
 
@@ -1222,12 +1229,10 @@ script:
             id(maintenance_event).trigger(box_event_str(box.kind));
           }
 
-          // Ship the record: whatever the buffer still holds, then the end
-          // record that decodes it and carries the verdict. Retained, so a
-          // hub that was down sees the last visit and knows to ask for it.
-          id(publish_visit_chunk).execute();
-          VisitRecorder &rec = get_visit_recorder();
-          static std::string payload;
+          // Close the frame around the samples and finish its journal entry —
+          // the samples are already on flash, this writes the trailer. The
+          // shipper publishes it from there, retained, once the broker takes
+          // it. Nothing on this task waits for the network.
           BlobEnd blob_end;
           blob_end.id = id(event_start);
           blob_end.ended = now;
@@ -1240,15 +1245,17 @@ script:
           blob_end.box = &box;
           blob_end.project = ESPHOME_PROJECT_NAME;
           blob_end.version = ESPHOME_PROJECT_VERSION;
-          rec.end_record(get_weight_buf(), blob_end, blob_cfg, payload);
-          if (!id(mqtt_client).publish("${mqtt_topic}/visit/last", payload, 1, true)) {
-            ESP_LOGW("BLOB", "End record publish refused (%u bytes)", (unsigned) payload.size());
-          } else {
-            ESP_LOGI("BLOB", "Visit %lld: %d samples in %d chunks, end record %u bytes",
-                     (long long) blob_end.id, samples, rec.chunks(), (unsigned) payload.size());
+          size_t frame_len = get_visit_recorder().finish(get_weight_buf(), blob_end, blob_cfg);
+          ESP_LOGI("BLOB", "Visit %lld: %d samples, frame %u bytes", (long long) blob_end.id, samples,
+                   (unsigned) frame_len);
+          if (!get_visit_store().close(frame_len)) {
+            // No journal (firmware OTA'd onto an old partition table, or a
+            // flash error): the old blocking publish is still better than
+            // losing the visit.
+            ESP_LOGW("BLOB", "No journal entry, publishing from RAM");
+            id(mqtt_client).publish("${mqtt_topic}/visit/last",
+                                    reinterpret_cast<const char *>(&get_weight_buf().frame()), frame_len, 0, true);
           }
-          payload.clear();
-          payload.shrink_to_fit();
           id(event_start) = 0;
       # Closed by the timeout or by settled litter: the scale is still busy.
       - if:
