@@ -94,17 +94,21 @@ YAML to match your wiring.
 ## Firmware Setup
 
 1. Clone this repo (or copy [`litterbox-monitor.yaml`](litterbox-monitor.yaml),
-   [`state_analyzer.h`](state_analyzer.h) and [`visit_blob.h`](visit_blob.h)
-   into the same directory — all three are required).
+   [`state_analyzer.h`](state_analyzer.h), [`visit_blob.h`](visit_blob.h) and
+   [`visit_store.h`](visit_store.h) into the same directory — all four are
+   required).
 
 2. Create a `secrets.yaml` next to them defining:
    `wifi_ssid`, `wifi_password`, `litterbox_api_key`, `litterbox_ota_password`,
    `litterbox_ap_password`, and `mqtt_broker` (host or IP of an MQTT broker).
    Home Assistant talks to the device over the native API as before; the
    broker only receives the visit record — every sample the analyzer saw,
-   plus its verdict — so a visit can be replayed off the device. The
-   `mqtt:` block carries placeholder credentials (`litterbox`/`litterbox`);
-   change them to whatever your broker expects.
+   plus its verdict — so a visit can be replayed off the device. Each visit
+   is one retained message, journaled to a 512 KB flash partition first and
+   shipped from there, so a broker that was down for a week gets every
+   visit when it comes back. The `mqtt:` block carries placeholder
+   credentials (`litterbox`/`litterbox`); change them to whatever your
+   broker expects.
 
 3. Edit the `substitutions` block at the top of the YAML:
 
@@ -119,7 +123,9 @@ YAML to match your wiring.
 4. If you wired the HX711 to different GPIO pins, update the `hx711` sensor
    section accordingly (see [Assembly](#assembly)).
 
-5. Flash with ESPHome as usual.
+5. Flash with ESPHome over USB the first time: the journal partition
+   changes the partition table, which OTA never touches. Saved calibration
+   does not survive that table change, so re-tare afterwards.
 
 ## Calibration
 

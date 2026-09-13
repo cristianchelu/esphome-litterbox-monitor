@@ -18,6 +18,22 @@ static const int SA_MAX_ZONES = 256;
 static const float SA_URINATION_STD_DEV_THRESHOLD_G = 4.0f;
 static const int16_t SA_SCALE_ABS = 1;    // 1g, identical to previous behavior
 static const int16_t SA_SCALE_DELTA = 10; // 0.1g, used during OCCUPIED/ELIMINATING
+/** Room after a full buffer for the text trailer (see visit_blob.h). */
+static const int SA_FRAME_TAIL = 24 * 1024;
+
+/**
+ * The buffer's storage, laid out as the record that leaves the device: an
+ * 8-byte header, the raw int16 codes, then room for a text trailer written
+ * when the visit ends. Shipping it is a pointer and a length into this
+ * struct; nothing is copied. visit_blob.h owns the header and trailer.
+ */
+struct VisitFrame {
+  char magic[4];
+  uint32_t count;
+  int16_t samples[SA_MAX_SAMPLES];
+  char tail[SA_FRAME_TAIL];
+};
+static_assert(sizeof(VisitFrame) == 8 + 2 * SA_MAX_SAMPLES + SA_FRAME_TAIL, "frame must be packed");
 
 /**
  * Scratch for median-RMS over eliminating windows.
@@ -187,14 +203,14 @@ class WeightBuffer {
     // Round, don't truncate: a decoded value re-encodes to the same code,
     // so a replay that pushes decoded grams rebuilds this buffer exactly.
     int16_t enc = static_cast<int16_t>(lroundf(std::max(-32768.0f, std::min(32767.0f, val))));
-    samples_[count_++] = enc;
+    frame_.samples[count_++] = enc;
     return decode_(enc, *z);
   }
 
   /** Rebuild verbatim from a published record (raw codes plus zone table). */
   void restore(const int16_t *samples, int n, const ZoneEntry *zones, int nz) {
     count_ = std::min(n, SA_MAX_SAMPLES);
-    memcpy(samples_, samples, count_ * sizeof(int16_t));
+    memcpy(frame_.samples, samples, count_ * sizeof(int16_t));
     zone_count_ = std::min(nz, SA_MAX_ZONES);
     memcpy(zones_, zones, zone_count_ * sizeof(ZoneEntry));
     current_zone_ = zone_count_ - 1;
@@ -203,13 +219,15 @@ class WeightBuffer {
   int count() const { return count_; }
   int zone_count() const { return zone_count_; }
   const ZoneEntry &zone(int i) const { return zones_[i]; }
-  int16_t raw_sample(int idx) const { return samples_[idx]; }
+  int16_t raw_sample(int idx) const { return frame_.samples[idx]; }
+  VisitFrame &frame() { return frame_; }
+  const VisitFrame &frame() const { return frame_; }
 
   /** Grams the analyzer saw for sample `idx`. */
   float sample_to_grams(int idx) const {
     const ZoneEntry *z = zone_for_index(idx);
     if (!z || idx < 0 || idx >= count_) return 0.0f;
-    return decode_(samples_[idx], *z);
+    return decode_(frame_.samples[idx], *z);
   }
 
   /**
@@ -278,7 +296,7 @@ class WeightBuffer {
     return sqrtf(sq / static_cast<float>(n));
   }
 
-  int16_t samples_[SA_MAX_SAMPLES];
+  VisitFrame frame_;
   int count_ = 0;
   ZoneEntry zones_[SA_MAX_ZONES];
   int zone_count_ = 0;
