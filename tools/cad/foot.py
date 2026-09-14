@@ -20,9 +20,9 @@ CELL_X0 = -14.5; CELL_X1 = CELL_X0+CELL_S
 WIN_X0, WIN_X1, WIN_HY, WIN_R = -12.5, 6.5, 10.5, 4.0
 PLAT_H     = 2.0                     # platform the cell sits on, above the plate top
 BITE_D, BITE_X = 8.0, 14.2           # wire drop at the platform's +X edge
-RIB_Y      = (5.0, 6.5)              # rib pair each side of the wire channel
+RIB_Y      = (6.0, 7.5)              # rib pair each side of the channel notch
 RIB_X      = ((-8.0,-6.5),(3.5,5.0)) # rib pair top/bottom
-EXIT_X0, EXIT_HY = 20.5, 5.0         # plate notch under the +X wall, wires out on the MDF face
+EXIT_X0, EXIT_HY, EXIT_H = 20.5, 5.25, 2.1  # notch under the +X wall: 10.5 x 2.1, the CELL channel bar (channels.py) ends inside on the plate step
 HOUSE_H  = 4.5                       # housing height above the cap plate
 HOUSE_IX = 12.6                      # half-size of the housing at the S-curve inflection (mid height)
 HOUSE_IR = 7.6                       # corner radius there (centres at +-5, same as the cavity)
@@ -65,7 +65,7 @@ for y0,y1 in (RIB_Y, (-RIB_Y[1],-RIB_Y[0])):
 for x0,x1 in RIB_X:
     base = base.fuse(box(x0, x1, -W/2+WALL-0.01, -CELL_S/2-CLR_METAL, 0, WALL_H))
     base = base.fuse(box(x0, x1, CELL_S/2+CLR_METAL, W/2-WALL+0.01, 0, WALL_H))
-base = base.cut(box(EXIT_X0, L/2+1, -EXIT_HY, EXIT_HY, -PLATE-1, 0))            # wire exit under the +X wall
+base = base.cut(box(EXIT_X0, L/2+1, -EXIT_HY, EXIT_HY, -PLATE-1, EXIT_H-PLATE))   # channel notch under the +X wall, into the wall's foot
 for x,y in SCREW: base = base.cut(cyl(SHANK/2, x, y, -PLATE-1, 1))
 base = base.removeSplitter()
 
@@ -132,7 +132,8 @@ foot = box(-FOOT_BLK[0]/2, FOOT_BLK[0]/2, -FOOT_BLK[1]/2, FOOT_BLK[1]/2, zf, zf+
 
 def add(name, shape, color, transp=0, vis=True):
     o = doc.addObject("Part::Feature", name); o.Shape = shape
-    o.ViewObject.ShapeColor = color; o.ViewObject.Transparency = transp; o.ViewObject.Visibility = vis; return o
+    if App.GuiUp: o.ViewObject.ShapeColor = color; o.ViewObject.Transparency = transp; o.ViewObject.Visibility = vis
+    return o
 add("Base", base, (0.93,0.92,0.88)); add("Cap", cap, (0.93,0.92,0.88))
 for t,s in shims.items(): add("Shim_%s" % str(t).replace('.','_'), s, (0.7,0.7,0.75), vis=False)
 add("CellMetal_ref", metal, (0.75,0.75,0.78)); add("CellFoot_ref", foot, (0.1,0.1,0.1))
@@ -148,12 +149,14 @@ def dist(a,b): return round(doc.getObject(a).Shape.distToShape(doc.getObject(b).
 print("gaps: base-cap", dist("Base","Cap"), " base-metal", dist("Base","CellMetal_ref"), " cap-metal", dist("Cap","CellMetal_ref"), " cap-foot", dist("Cap","CellFoot_ref"))
 print("cap volume", round(doc.getObject("Cap").Shape.Volume,1), "(ref 4425.7)  base", round(doc.getObject("Base").Shape.Volume,1), "(ref 5664.0)")
 print("shell height (base bottom to cap top):", round(doc.getObject("Cap").Shape.BoundBox.ZMax + PLATE, 2), " foot protrudes", round(doc.getObject("CellFoot_ref").Shape.BoundBox.ZMax - doc.getObject("Cap").Shape.BoundBox.ZMax,2))
-Gui.SendMsgToActiveView("ViewFit")
+if App.GuiUp: Gui.SendMsgToActiveView("ViewFit")
 
-# ---- outputs next to this script: <part>.stl (print) + .step, and the FreeCAD document
+# ---- outputs next to this script: <part>.stl (print) + .step, and the FreeCAD document (skipped when the caller
+# seeds the namespace with EXPORT = False, e.g. assembly.py previewing)
 import os as _os
-_CAD = _os.path.dirname(_os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor/tools/cad'
-for _nm in PARTS:
-    export_stl(doc.getObject(_nm).Shape, _os.path.join(_CAD, 'foot_%s.stl' % _nm.lower()))
-    doc.getObject(_nm).Shape.exportStep(_os.path.join(_CAD, 'foot_%s.step' % _nm.lower()))
-doc.saveAs(_os.path.join(_CAD, 'foot.FCStd'))
+if globals().get('EXPORT', True):
+    _CAD = _os.path.dirname(_os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor-enclosure/tools/cad'
+    for _nm in PARTS:
+        export_stl(doc.getObject(_nm).Shape, _os.path.join(_CAD, 'foot_%s.stl' % _nm.lower()))
+        doc.getObject(_nm).Shape.exportStep(_os.path.join(_CAD, 'foot_%s.step' % _nm.lower()))
+    doc.saveAs(_os.path.join(_CAD, 'foot.FCStd'))

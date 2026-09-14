@@ -30,22 +30,27 @@ LIP_H   = 2.0           # glue lip: inner 0.5 of the Top wall drops into a 0.7 r
 LIP_T   = 0.5
 # ESP32-S3 SuperMini 23.5 x 18 x 1.2, components UP so the WS2812 lights the nose cavity; USB-C (8.94 x 7.35 x 3.11,
 # protrudes 1.5) out the rear, under the board. Seen from above with the USB pointing +Y the wired row (5V GND 3V3 13 12 11
-# from the USB end, then 10 9 8) is the +X edge, so the board lives on the -X half: wired edge and wire run toward the
-# centre, the all-unwired row on the outer edge where the retention grabs it.
+# from the USB end, then 10 9 8) is the +X edge. The board's X is set by the LED: it sits on the light bar's centre line
+# (2026-09-13, was -7.7 with the board mirrored about the USB notch: the bar lit visibly lopsided), so the board straddles
+# the centre with its wired row 2.5 mm past X = 0; the ribbon slot moves out to the +X flank beside it.
 PCB_L, PCB_W = 23.5, 18.0
-PCB_X0, PCB_X1 = -23.2, -5.2          # outer edge (unwired row) .. inner edge (wired row)
-PCB_XC = (PCB_X0+PCB_X1)/2            # USB notch here, ribbon slot mirrored at -PCB_XC
 # through-hole grid (measured 2026-09-12): 2 rows x 9, 2.54 pitch, rows 1.27 in from the long edges, ends 1.59
 PIN_PITCH, PIN_INSET, PIN_END, PIN_N, PIN_HOLE = 2.54, 1.27, 1.59, 9, 1.0
-PIN_X_OUT, PIN_X_IN = PCB_X0+PIN_INSET, PCB_X1-PIN_INSET
 # WS2812 sits between the GPIO9 and GPIO10 pads (8th/7th pin from the USB end, wired row), just inboard of them. It has
 # to be in front of the sleeve's roof edge (Y = -BACK-GAP) to shine up into the nose: that fixes the board's Y and T.
-LED_Y, LED_FROM_EDGE, LED_S, LED_H = -3.5, 2.5, 2.0, 1.0
+LED_X, LED_Y, LED_FROM_EDGE, LED_S, LED_H = 0.0, -3.5, 2.5, 2.0, 1.0   # LED on the bar's centre line
+PCB_X1 = LED_X + LED_FROM_EDGE        # inner edge (wired row) .. outer edge (unwired row)
+PCB_X0 = PCB_X1 - PCB_W
+PCB_XC = (PCB_X0+PCB_X1)/2            # USB notch here
+PIN_X_OUT, PIN_X_IN = PCB_X0+PIN_INSET, PCB_X1-PIN_INSET
 PCB_Y1 = LED_Y + PIN_END + 6.5*PIN_PITCH
 PCB_Y0 = PCB_Y1 - PCB_L
 PIN_Y  = [PCB_Y1-PIN_END-i*PIN_PITCH for i in range(PIN_N)]   # pin 1 at the USB end
-LED_X  = PCB_X1 - LED_FROM_EDGE
-PEGS = True; PEG_D, PEG_H = 0.7, 1.0  # locating pegs into outer pins 1 and 6 (unwired)
+# retention is pegs only (rev 4): the board sits on standoffs at pins 4 and 6 of both rows, a peg through each pad hole.
+# Nothing springs; the CapSleeve captures the board once it is on, and the stack is built roof-down so gravity holds it
+# until then. The rev 3 snap posts (0.8 thick, 1.0 deflection 4.6 from the root, ~6% strain across layers) broke at once.
+PEG_PINS = (3, 5)                     # 0-based from the USB end: pins 4 and 6, both rows bare from pin 4 back
+PEG_D, PEG_H = 0.9, 1.2               # 0.05 per side in the 1.0 hole (measure a print), flush with the board underside
 ROOF_Z  = -MDF_T - ROOF               # Mid roof underside
 SROOF_T = ROOF_Z - GAP                # sleeve roof top ..
 SROOF_B = SROOF_T - SW_ROOF           # .. and underside: the ESP32 hangs from here
@@ -54,9 +59,7 @@ USB_ZT  = SROOF_B - USB_CLR           # the stack hangs from the liner roof; the
 PCB_ZT  = USB_ZT - USB_HT
 PCB_ZB  = PCB_ZT - 1.2
 USB_ZC  = (PCB_ZT + USB_ZT)/2
-CATCH   = 0.3                         # snap catch depth; the post runs 0.1 past the catch's lower face
-POST_BOT= PCB_ZB - 2*CATCH - 0.1
-PLATE_T = PCB_ZB - 0.8                # cap sleeve top: pad-side passives (0.7, facing down now) + 0.1; posts clear it by 0.1
+PLATE_T = PCB_ZB - 0.8                # cap sleeve top: pad-side passives (0.7, facing down now) + 0.1
 PLATE_B = PLATE_T - CSW
 Z_BOT   = PLATE_B - GAP               # base underside / cap top
 CAP_BOT = Z_BOT - CAP
@@ -64,10 +67,17 @@ T       = PCB_Y1 + CLR + WALL         # PCB end + clearance + Mid rear wall (por
                                       # is slotted for the board, so the plug still reaches the port
 SCREW_XY = [(-30,7),(30,7)]           # two bosses on the flanks, inside the tail liner's rear corners
 BOSS_R   = 5.0
-RIB_XC   = -PCB_XC                    # ribbon slot in the MDF-facing roof, mirror of the USB notch
-RIB_HW   = 6.0                        # 12 wide: a 4-pin Dupont housing (10.16) has to pass through it
-RIB_X0, RIB_X1 = RIB_XC-RIB_HW, RIB_XC+RIB_HW
-RIB_DEPTH = 4.0
+# Leads (2026-09-13, the printed pin header + Dupont housing are gone: Cristian doesn't unplug it): everything is
+# soldered flat onto the pads and leaves them horizontally. HX711 5V/GND/3V3 off the wired row's pads 1-3, out through
+# the ribbon slot in the MDF-facing roof (same 14.6 x 4 footprint as rev 4, on the +X flank); HX711 CLK/DAT off the
+# outer row's pads 2-3; touch OUT off the outer row's pad 1, its VCC and GND second wires on the 3V3 and GND pads.
+# Nothing printed holds the leads: they are dressed by hand and taped down (2026-09-14, the wire combs and modelled
+# routes are gone), so the tail liner's underside is clear from the standoffs to the flanks.
+RIB_X0   = PCB_X1 + 2.0               # slot from 1 mm outboard of the pin-4/6 standoffs (they reach PCB_X1 + 1) ...
+RIB_X1   = SCREW_XY[1][0] - BOSS_R - 2.3   # ... to 2.3 short of the +X boss: 18.2 wide, takes the 16 mm RIBBON channel bar
+RIB_XC   = (RIB_X0+RIB_X1)/2          # 13.6: hx711.py RIBBON_X must match so the run is straight
+RIB_DEPTH = 4.5                       # slot depth in front of the rear wall: the bar ends 0.7 short of its front edge
+NOTCH_H  = 2.9                        # channels.py RIBBON notch_h: notch over the rear wall for the bar (was just the roof's 1 mm)
 # TTP223B 15 x 11, the 3.5 mm pin strip taken off the 15 mm length (pins along the short edge). PCB lies on its
 # side: 15 mm across the face (X), 11 mm along the slope, pin strip at -X. Circle centre is 9.25 from the pin
 # edge -> PCB X -9.25..5.75 puts it on X = 0; along the slope the circle is the PCB centre.
@@ -154,7 +164,7 @@ R_DISH = (DISK_D**2/4 + DISK_DEPTH**2)/(2*DISK_DEPTH)                       # sp
 base = base.cut(Part.makeSphere(R_DISH, disk_c - sw*(R_DISH - DISK_DEPTH)))   # touch dish
 base = base.cut(sstadium(-BAR_HW-0.3,BAR_HW+0.3, BAR_V0-0.3,BAR_V1+0.3, BAR_WALL, WALL+0.6))    # light bar thinned, 0.3 beyond the slot
 base = port_opening(base)
-base = base.cut(box(RIB_X0, RIB_X1, T-WALL-RIB_DEPTH, T+1, ROOF_Z, -MDF_T+0.1))      # ribbon slot through the roof only; wall stays intact
+base = base.cut(box(RIB_X0, RIB_X1, T-WALL-RIB_DEPTH, T+1, -MDF_T-NOTCH_H, -MDF_T+0.1))   # ribbon slot through the roof, NOTCH_H notch over the rear wall
 for x,y in SCREW_XY: base = base.cut(cyl(3.9/2, x, y, CAP_BOT-1, 0))
 base = base.removeSplitter()
 
@@ -225,12 +235,12 @@ tail = tail.fuse(rb_full(q, PLATE_T+CLR, SROOF_T).cut(rb_full(q+TONGUE_T, Z_BOT-
 tail = tail.cut(box(PCB_X0-CLR, PCB_X1+CLR, T-n-1, T+1, Z_BOT-1, PCB_ZT+CLR))
 tail = tail.cut(stadium_y(PCB_XC, USB_ZC, USB_W, USB_H, T-n-1, T+1))
 tail = tail.cut(box(PCB_XC-USB_W/2, PCB_XC+USB_W/2, T-n-1, T+1, PCB_ZT, USB_ZC))
-tail = tail.cut(box(RIB_X0, RIB_X1, T-WALL-RIB_DEPTH, T+1, SROOF_B-0.1, SROOF_T+0.1))   # ribbon slot, same footprint as the Mid's
+tail = tail.cut(box(RIB_X0, RIB_X1, T-WALL-RIB_DEPTH, T+1, min(SROOF_B-0.1, -MDF_T-NOTCH_H), SROOF_T+0.1))   # ribbon slot, same footprint as the Mid's, notch to the same depth
 for x,y in SCREW_XY: tail = tail.cut(cyl(3.9/2, x, y, SROOF_B-1, SROOF_T+1))
 # ---- PCB retention, all on the tail liner's roof: the board goes up from below, port stub into the rear-wall U.
 # Wiring assumption (2026-09-12): only 5V/GND/3V3 stay on the inner row (pins 1-3 from the USB end); HX711 CLK/DAT and
 # the touch pin move to the outer row's three USB-end pins. From pin 4 back both rows are free, so the retention is
-# symmetric: standoffs with pegs on the pin-4 pads, snap posts over pins 5-6, a pad on the port shell, and the bare
+# symmetric: standoffs with pegs on the pin-4 and pin-6 pads, a pad on the port shell, a foot on the chip, and the bare
 # underside of the antenna end rests on a bar on the CapSleeve.
 def hang(shape):
     global tail; tail = tail.fuse(shape)
@@ -238,55 +248,21 @@ SO_W = 1.8
 WIRED_Y = PIN_Y[2] + 0.9                                           # nothing touches the board rearward of the pin-3 pads
 EDGES = ((PCB_X0, PIN_X_OUT, -1), (PCB_X1, PIN_X_IN, +1))        # edge, its pin row, and the direction away from the board
 for x_edge, x_pin, out in EDGES:
-    yc = PIN_Y[3]
     xa, xb = x_edge + out*1.0, x_edge - out*SO_W                   # 1 mm outboard for stiffness
-    hang(box(min(xa,xb), max(xa,xb), yc-SO_W/2, yc+SO_W/2, PCB_ZT, SROOF_B+0.01))
-    if PEGS: hang(cyl(PEG_D/2, x_pin, yc, PCB_ZT-PEG_H, PCB_ZT+0.5))
+    for i in PEG_PINS:
+        yc = PIN_Y[i]
+        hang(box(min(xa,xb), max(xa,xb), yc-SO_W/2, yc+SO_W/2, PCB_ZT, SROOF_B+0.01))
+        hang(cyl(PEG_D/2, x_pin, yc, PCB_ZT-PEG_H, PCB_ZT+0.5))
 hang(box(PCB_XC-2.5, PCB_XC+2.5, PCB_Y1-6.0, PCB_Y1-1.0, USB_ZT+CLR, SROOF_B+0.01))   # rests on the port shell
-def prism_xz(pts, y0, y1):     # closed XZ polygon extruded along Y
-    w = Part.makePolygon([V(x,y0,z) for x,z in pts] + [V(pts[0][0],y0,pts[0][1])])
-    return Part.Face(w).extrude(V(0,y1-y0,0))
-def catch45(x_face, inward, y0, y1, depth=0.4):
-    """45-degree catch on a vertical face at x_face; 'inward' is +1/-1 toward the PCB. Top corner level with the PCB
-    bottom, so at the PCB edge (CLR away) the face is CLR under it. Both faces are 45 deg -> printable either way up."""
-    return prism_xz([(x_face, PCB_ZB), (x_face+inward*depth, PCB_ZB-depth), (x_face, PCB_ZB-2*depth-0.1)], y0, y1)
-# catch posts: slim posts hanging from the sleeve roof with a 45-deg catch, concave fillet at the root.
-POST_T, POST_W = 0.8, 4.0
-FOOT_R = 0.8
-def post(x_face, inward, y0, y1):
-    xo = x_face - inward*POST_T                       # outer face (away from the PCB)
-    p = box(min(x_face,xo), max(x_face,xo), y0, y1, POST_BOT, SROOF_B+0.01)
-    p = p.fuse(catch45(x_face, inward, y0, y1, CATCH))
-    foot = box(min(xo, xo-inward*FOOT_R), max(xo, xo-inward*FOOT_R), y0, y1, SROOF_B-FOOT_R, SROOF_B+0.01)
-    foot = foot.cut(Part.makeCylinder(FOOT_R, y1-y0+2, V(xo-inward*FOOT_R, y0-1, SROOF_B-FOOT_R), V(0,1,0)))
-    return p.fuse(foot)
-CLIP_Y = (PIN_Y[5]-0.8, PIN_Y[5]-0.8+POST_W)          # over pins 5-6, 1 mm short of the pin-4 standoff
-for x_edge, _, out in EDGES: hang(post(x_edge + out*CLR, -out, *CLIP_Y))
-FING_T, FING_LIP, FING_L = POST_T, CATCH, (SROOF_B-PCB_ZB)
-# ---- pin header for the HX711 ribbon, printed into the liner: a block hanging from the roof with four holes at 2.54 pitch
-# that bare header pins are pushed through (their barbs bite the PLA), pins pointing rearward. The ESP32 wires are
-# soldered to the 3 mm front ends; the ribbon's standard 4-way female housing pushes onto the 6 mm rear ends and lies
-# flat toward the ribbon slot, its wires bending up into the slot. Fully mated, the housing's face sits on the block, so
-# mating force never drives the pins through. Printed roof-down the holes are horizontal: made a little taller than wide
-# so the sagging top still clears the pin.
-PITCH = 2.54
-PIN_SQ, PIN_L, PIN_MATE, PIN_TAIL = 0.64, 11.5, 6.0, 3.0           # header pin: section, length, exposed rear, solder front
-HOLE_W, HOLE_H = 0.75, 0.85                                       # press fit for the barbs; MEASURE after a test print
-CAR_T = PIN_L - PIN_MATE - PIN_TAIL                               # block thickness along Y = the pin's barbed middle
-FH_W, FH_T, FH_L = 10.16, 2.54, 14.0                              # female housing on the ribbon
-FH_YR = T - n - 3.5                                               # housing rear face: 3.5 mm bend room to the liner's rear wall
-FH_YF = FH_YR - FH_L
-FH_Z0 = PLATE_T + CLR                                             # housing lies on the CapSleeve
-PIN_ZC = FH_Z0 + FH_T/2                                           # contact centre line
-CAR_YR = FH_YF - CLR; CAR_YF = CAR_YR - CAR_T                     # block rear face is what the housing bottoms on
-CAR_Z0 = PIN_ZC - HOLE_H/2 - 0.6                                  # 0.6 of plastic under the holes
-PIN_XC = [RIB_XC + (i-1.5)*PITCH for i in range(4)]
-CAR_X0, CAR_X1 = RIB_XC - FH_W/2 - 1.0, RIB_XC + FH_W/2 + 1.0
-car = box(CAR_X0, CAR_X1, CAR_YF, CAR_YR, CAR_Z0, SROOF_B+0.01)
-for xc in PIN_XC:
-    car = car.cut(box(xc-HOLE_W/2, xc+HOLE_W/2, CAR_YF-1, CAR_YR+1, PIN_ZC-HOLE_H/2, PIN_ZC+HOLE_H/2))
-hang(car)
-hang(box(CAR_X0, CAR_X1, CAR_YF, -BACK-GAP-SW-CLR+0.01, SROOF_B, SROOF_T))       # roof lobe so the block sits on the bed
+# third support: a foot on the ESP32-S3 chip. The 7 x 7 QFN sits at 45 deg between the rows, corners pointing at the
+# GPIO11/GPIO10 gap, centre almost on the tail roof's front edge; its top is 3.2 under the roof's outer face (caliper,
+# 2026-09-13). With the port pad and the four standoffs it gives the board a plane to sit on, mid-span where the pegs
+# cannot help. Set 0.5 rearward so it stays under the roof tongue.
+CHIP_S, CHIP_H = 7.0, 1.0
+CHIP_Y = (PIN_Y[5]+PIN_Y[6])/2
+CHIP_TOP = SROOF_T - 3.2
+CHIP_FOOT_D, CHIP_FOOT_DY = 3.0, 0.5
+hang(cyl(CHIP_FOOT_D/2, PCB_XC, CHIP_Y+CHIP_FOOT_DY, CHIP_TOP, SROOF_B+0.01))
 tail = tail.removeSplitter()
 
 # ---------------- CAP SLEEVE (black plate on the cap) ----------------
@@ -317,32 +293,32 @@ pcb = box(PCB_X0, PCB_X1, PCB_Y0, PCB_Y1, PCB_ZB, PCB_ZT)
 for x in (PIN_X_OUT, PIN_X_IN):
     for y in PIN_Y: pcb = pcb.cut(cyl(PIN_HOLE/2, x, y, PCB_ZB-1, PCB_ZT+1))
 usb = stadium_y(PCB_XC, USB_ZC, 8.94, USB_HT, PCB_Y1+1.5-7.35, PCB_Y1+1.5)     # receptacle shell is a stadium too
+chip = box(PCB_XC-CHIP_S/2, PCB_XC+CHIP_S/2, CHIP_Y-CHIP_S/2, CHIP_Y+CHIP_S/2, PCB_ZT, CHIP_TOP)
+chip.rotate(V(PCB_XC, CHIP_Y, 0), V(0,0,1), 45)
 plug= box(PCB_XC-6, PCB_XC+6, PCB_Y1+1.5, PCB_Y1+1.5+20, USB_ZC-3.25, USB_ZC+3.25)
 led = box(LED_X-LED_S/2, LED_X+LED_S/2, LED_Y-LED_S/2, LED_Y+LED_S/2, PCB_ZT, PCB_ZT+LED_H)
 pad = sbox(PAD_X0, PAD_X1, PAD_V0, PAD_V1, WALL+GAP+SW_PAD, WALL+GAP+SW_PAD+1.2)   # taped into the sleeve recess
-# refs: the four pins through the block, and the ribbon's female housing mated on them
-pins = None
-for xc in PIN_XC:
-    t = box(xc-PIN_SQ/2, xc+PIN_SQ/2, CAR_YF-PIN_TAIL, CAR_YR+PIN_MATE, PIN_ZC-PIN_SQ/2, PIN_ZC+PIN_SQ/2)
-    pins = t if pins is None else pins.fuse(t)
-fh = box(RIB_XC-FH_W/2, RIB_XC+FH_W/2, FH_YF, FH_YR, FH_Z0, FH_Z0+FH_T)
-for xc in PIN_XC: fh = fh.cut(box(xc-0.5, xc+0.5, FH_YF-1, FH_YF+PIN_MATE+0.5, PIN_ZC-0.5, PIN_ZC+0.5))
+# the LED's useful light: loft from the LED's top face to the bar's inner face
+led_sq = Part.makePolygon([V(LED_X-LED_S/2,LED_Y-LED_S/2,PCB_ZT+LED_H), V(LED_X+LED_S/2,LED_Y-LED_S/2,PCB_ZT+LED_H),
+                           V(LED_X+LED_S/2,LED_Y+LED_S/2,PCB_ZT+LED_H), V(LED_X-LED_S/2,LED_Y+LED_S/2,PCB_ZT+LED_H), V(LED_X-LED_S/2,LED_Y-LED_S/2,PCB_ZT+LED_H)])
+bar_rc = Part.makePolygon([spt(-BAR_HW,BAR_V1,BAR_WALL), spt(BAR_HW,BAR_V1,BAR_WALL), spt(BAR_HW,BAR_V0,BAR_WALL), spt(-BAR_HW,BAR_V0,BAR_WALL), spt(-BAR_HW,BAR_V1,BAR_WALL)])
+cone = Part.makeLoft([led_sq, bar_rc], True, True)
 
 def add(name, shape, color, transp=0):
     ob = doc.addObject("Part::Feature", name); ob.Shape = shape
-    ob.ViewObject.ShapeColor = color; ob.ViewObject.Transparency = transp; return ob
+    if App.GuiUp: ob.ViewObject.ShapeColor = color; ob.ViewObject.Transparency = transp
+    return ob
 add("Top",       top,    (0.93,0.92,0.88))
 add("Mid",       mid,    (0.88,0.87,0.83))
 add("Sleeve",    sleeve, (0.12,0.12,0.12))
 add("TailSleeve", tail,  (0.15,0.15,0.15))
 add("CapSleeve", plate,  (0.18,0.18,0.18))
 add("Cap",       cap,    (0.93,0.92,0.88))
-add("ESP32_ref", pcb.fuse(usb), (0.1,0.35,0.1))
+add("ESP32_ref", pcb.fuse(usb).fuse(chip), (0.1,0.35,0.1))
 add("LED_ref",   led,   (0.2,0.9,0.3))
 add("USBplug_ref", plug, (0.3,0.3,0.3), 60)
 add("TTP223_ref", pad, (0.8,0.1,0.1))
-add("Pins_ref", pins, (0.85,0.75,0.1))
-add("Housing_ref", fh, (0.2,0.2,0.2))
+add("LightCone_ref", cone, (1.0,0.85,0.2), 70)
 add("MDF_ref",  mdf,  (0.55,0.45,0.30), 75)
 doc.recompute()
 PARTS = ("Top","Mid","Sleeve","TailSleeve","CapSleeve","Cap")
@@ -351,7 +327,7 @@ for nm in PARTS:
     print(nm, "valid:", s.isValid(), "solids:", len(s.Solids), "vol:", round(s.Volume,1),
           "bbox:", [round(v,1) for v in (bb.XMin,bb.XMax,bb.YMin,bb.YMax,bb.ZMin,bb.ZMax)])
 print("slope from vertical:", round(ang,1), "deg, length", round(SLOPE_LEN,1), " under-board:", round(-MDF_T-CAP_BOT,2), " T:", round(T,2))
-REFS = ("ESP32_ref","LED_ref","USBplug_ref","TTP223_ref","Pins_ref","Housing_ref","MDF_ref")
+REFS = ("ESP32_ref","LED_ref","USBplug_ref","TTP223_ref","MDF_ref")
 pairs = [(a,b) for ia,a in enumerate(PARTS) for b in PARTS[ia+1:]] + [(a,r) for a in PARTS for r in REFS]
 for a,b in pairs:
     c = doc.getObject(a).Shape.common(doc.getObject(b).Shape)
@@ -366,17 +342,19 @@ print("pad PCB v:", round(PAD_V0,2), "..", round(PAD_V1,2), " circle at v", roun
 under_head = CAP + CLR + SW_ROOF + GAP + ROOF
 print("screw: head recess depth", round(BOSS_TOP-CAP-CAP_BOT,2), " plastic under head", round(under_head,2), " -> 4x16 bites", round(16-under_head,1), "mm of MDF, ", SCREW_XY[0][1], "mm from the MDF edge")
 cc = (W/2-R_REAR, T-R_REAR)                                    # tail corner arc centre (+X side)
-print("boss to PCB:", round(PCB_X0-(SCREW_XY[0][0]+BOSS_R),2), " to post foot", round((PCB_X0-CLR-POST_T-FOOT_R)-(SCREW_XY[0][0]+BOSS_R),2),
+print("boss to PCB:", round(PCB_X0-(SCREW_XY[0][0]+BOSS_R),2), " to standoff", round((PCB_X0-1.0)-(SCREW_XY[0][0]+BOSS_R),2),
       " to tail corner", round((R_REAR-n)-(math.hypot(SCREW_XY[1][0]-cc[0], SCREW_XY[1][1]-cc[1])+BOSS_R),2), " to tail rear wall", round((T-n)-(SCREW_XY[1][1]+BOSS_R),2))
-print("pin block: X", round(CAR_X0,2), "..", round(CAR_X1,2), " Y", round(CAR_YF,2), "..", round(CAR_YR,2), " Z", round(CAR_Z0,2), "..", round(SROOF_B,2), " hole", HOLE_W, "x", HOLE_H, " pin centre Z", round(PIN_ZC,2),
-      " block to plate", round(CAR_Z0-PLATE_T,2), " housing Y", round(FH_YF,1), "..", round(FH_YR,1), " to ribbon slot", round(T-WALL-RIB_DEPTH-FH_YR,2), " housing-tail gap", dist("TailSleeve","Housing_ref"), " pins-housing", dist("Pins_ref","Housing_ref"), " pins to LED", dist("Pins_ref","LED_ref"))
-print("post nominal strain ~%.1f%%" % (100*1.5*FING_T*FING_LIP/FING_L**2), " standoff height", round(SROOF_B-PCB_ZT,2), " port top to tail roof", round(SROOF_B-USB_ZT,2))
-print("pegs at pin 4 both rows, peg-to-hole gap", round((PIN_HOLE-PEG_D)/2,2), " retention Y max", round(max(PIN_Y[3]+SO_W/2, CLIP_Y[1]),2), "< first wired pad at", round(WIRED_Y,2))
+print("board X:", PCB_X0, "..", PCB_X1, " LED X", LED_X, " ribbon slot X", round(RIB_X0,2), "..", round(RIB_X1,2), " Y", round(T-WALL-RIB_DEPTH,2), "..", round(T-WALL,2), " to +X boss", round((SCREW_XY[1][0]-BOSS_R)-RIB_X1,2))
+print("standoff height", round(SROOF_B-PCB_ZT,2), " port top to tail roof", round(SROOF_B-USB_ZT,2))
+print("chip foot: height", round(SROOF_B-CHIP_TOP,2), " chip top above PCB", round(CHIP_TOP-PCB_ZT,2), " at Y", round(CHIP_Y+CHIP_FOOT_DY,2), " chip centre Y", round(CHIP_Y,2),
+      " foot front edge to roof tongue front", round((CHIP_Y+CHIP_FOOT_DY-CHIP_FOOT_D/2)-(-BACK-GAP-SW-CLR),2), " foot-chip", dist("TailSleeve","ESP32_ref"))
+print("pegs at pins", [i+1 for i in PEG_PINS], "both rows, peg-to-hole gap", round((PIN_HOLE-PEG_D)/2,2), " peg tip below board", round(PEG_H-1.2,2), " retention Y max", round(PIN_Y[min(PEG_PINS)]+SO_W/2,2), "< first wired pad at", round(WIRED_Y,2),
+      " front standoff edge", round(PIN_Y[max(PEG_PINS)]-SO_W/2,2), "vs tail roof front", round(TAIL_Y0,2))
 print("USB notch X:", round(PCB_XC-USB_W/2-USB_HORN,1), "..", round(PCB_XC+USB_W/2+USB_HORN,1), " ribbon slot X:", RIB_X0, "..", RIB_X1, " flat rear wall to X ±", W/2-R_REAR)
 
 def show_section(keep_x_positive=True):
     half = box(0 if keep_x_positive else -100, 100 if keep_x_positive else 0, -100, 100, -100, 100)
-    for nm in PARTS+("ESP32_ref","LED_ref","USBplug_ref","TTP223_ref","Pins_ref","Housing_ref"):
+    for nm in PARTS+("ESP32_ref","LED_ref","USBplug_ref","TTP223_ref","LightCone_ref"):
         ob = doc.getObject(nm)
         sc = doc.getObject(nm+"_sec") or doc.addObject("Part::Feature", nm+"_sec")
         sc.Shape = ob.Shape.common(half); sc.ViewObject.ShapeColor = ob.ViewObject.ShapeColor; sc.ViewObject.Transparency = 0
@@ -386,12 +364,14 @@ def show_section(keep_x_positive=True):
 def show_full():
     for ob in doc.Objects: ob.ViewObject.Visibility = not ob.Name.endswith("_sec")
     doc.recompute()
-Gui.SendMsgToActiveView("ViewFit")
+if App.GuiUp: Gui.SendMsgToActiveView("ViewFit")
 
-# ---- outputs next to this script: <part>.stl (print) + .step, and the FreeCAD document
+# ---- outputs next to this script: <part>.stl (print) + .step, and the FreeCAD document (skipped when the caller
+# seeds the namespace with EXPORT = False, e.g. assembly.py previewing)
 import os as _os
-_CAD = _os.path.dirname(_os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor/tools/cad'
-for _nm in PARTS:
-    export_stl(doc.getObject(_nm).Shape, _os.path.join(_CAD, 'brain_shell_%s.stl' % _nm.lower()))
-    doc.getObject(_nm).Shape.exportStep(_os.path.join(_CAD, 'brain_shell_%s.step' % _nm.lower()))
-doc.saveAs(_os.path.join(_CAD, 'brain_shell.FCStd'))
+if globals().get('EXPORT', True):
+    _CAD = _os.path.dirname(_os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor-enclosure/tools/cad'
+    for _nm in PARTS:
+        export_stl(doc.getObject(_nm).Shape, _os.path.join(_CAD, 'brain_shell_%s.stl' % _nm.lower()))
+        doc.getObject(_nm).Shape.exportStep(_os.path.join(_CAD, 'brain_shell_%s.step' % _nm.lower()))
+    doc.saveAs(_os.path.join(_CAD, 'brain_shell.FCStd'))
