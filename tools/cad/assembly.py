@@ -6,7 +6,7 @@ from FreeCAD import Vector as V, Placement, Rotation
 MDF_W, MDF_D, MDF_T = 750.0, 580.0, 18.0
 FOOT_INSET_X = 60.0      # foot centre in from the short (580) edges, i.e. along the long side
 FOOT_INSET_Y = 40.0      # foot centre in from the long (750) edges
-CAD = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor-enclosure/tools/cad'
+CAD = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor/tools/cad'
 EXPORT = globals().get('EXPORT', True)   # False: preview only, no STL/STEP/FCStd written by this or the part scripts
 
 def run(name):

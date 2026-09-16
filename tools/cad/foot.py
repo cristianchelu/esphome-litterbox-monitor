@@ -155,7 +155,7 @@ if App.GuiUp: Gui.SendMsgToActiveView("ViewFit")
 # seeds the namespace with EXPORT = False, e.g. assembly.py previewing)
 import os as _os
 if globals().get('EXPORT', True):
-    _CAD = _os.path.dirname(_os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor-enclosure/tools/cad'
+    _CAD = _os.path.dirname(_os.path.abspath(__file__)) if '__file__' in globals() and 'tools/cad' in __file__ else '/home/cristian/Source/esphome-litterbox-monitor/tools/cad'
     for _nm in PARTS:
         export_stl(doc.getObject(_nm).Shape, _os.path.join(_CAD, 'foot_%s.stl' % _nm.lower()))
         doc.getObject(_nm).Shape.exportStep(_os.path.join(_CAD, 'foot_%s.step' % _nm.lower()))
