@@ -206,6 +206,12 @@ api:
               ESP_LOGE("CAT", "Invalid cat index %d. Must be between 1 and 5.", (int) cat);
               return;
             }
+            // Negative would make every reading match the cat; grams would
+            // make none. 0 clears the slot.
+            if (!(weight >= 0.0f && weight <= 20.0f)) {
+              ESP_LOGE("CAT", "Invalid weight %.2f. Must be 0-20 kg (0 clears).", weight);
+              return;
+            }
             id(cat_weights)[cat - 1] = weight;
     - service: calibration_tare
       then:
@@ -214,9 +220,20 @@ api:
       variables:
         known_weight_kg: float
       then:
-        - script.execute:
-            id: calibrate_weight
-            known_weight_kg: !lambda return known_weight_kg;
+        # The button path can't get here without a tare, and its weight
+        # can't be 0; a service call can do both and wreck the calibration.
+        - if:
+            condition:
+              lambda: 'return id(calibration_tare_temp) != 0.0f && known_weight_kg > 0.0f;'
+            then:
+              - script.execute:
+                  id: calibrate_weight
+                  known_weight_kg: !lambda return known_weight_kg;
+            else:
+              - logger.log:
+                  level: ERROR
+                  tag: calibration
+                  format: "Ignored: run calibration_tare first, and pass a known weight above 0 kg"
 
 ota:
   - platform: esphome
