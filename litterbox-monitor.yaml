@@ -98,6 +98,12 @@ globals:
     type: int[5] # count
     initial_value: "{0, 0, 0, 0, 0}"
     restore_value: True
+  # Day the daily counters belong to (year * 1000 + day of year). The
+  # counters survive reboots, so the reset has to as well.
+  - id: daily_counters_day
+    type: int
+    initial_value: "0"
+    restore_value: True
   # Timestamp of last litter change
   - id: litter_changed_date
     type: time_t
@@ -120,9 +126,10 @@ globals:
     initial_value: "false"
     restore_value: False
 
-  # Timestamp of event start (activity first detected)
+  # millis() at event start (activity first detected). Not the wall clock:
+  # the first time sync after boot can land mid-event and skew the duration.
   - id: event_start
-    type: time_t
+    type: uint32_t
     initial_value: "0"
     restore_value: False
   
@@ -235,17 +242,17 @@ time:
   - platform: homeassistant
     timezone: ${timezone}
     id: homeassistant_time
+    on_time_sync:
+      # The countdown is NAN until the clock is valid; don't wait a minute more.
+      - component.update: litter_life_left
+      # Catch up on a midnight missed while powered off or without a clock.
+      - script.execute: roll_daily_counters
     on_time:
       - hours: 0
         minutes: 0
         seconds: 0
         then:
-          - lambda: !lambda |-
-              for (int i = 0; i < 5; i++) {
-                id(cat_daily_visits)[i] = 0;
-                id(cat_daily_pees)[i] = 0;
-                id(cat_daily_poops)[i] = 0;
-              }
+          - script.execute: roll_daily_counters
 
 sensor:
 # Cat sensors
@@ -933,6 +940,25 @@ button:
                 known_weight_kg: !lambda return id(calibration_known_weight).state / 1000.0;
 
 script:
+  # Zero the daily counters once the date has moved on. Runs at midnight and
+  # on every clock sync, so a midnight spent powered off still gets its reset.
+  - id: roll_daily_counters
+    then:
+      - lambda: !lambda |-
+          auto now = id(homeassistant_time).now();
+          if (!now.is_valid()) return;
+          int today = now.year * 1000 + now.day_of_year;
+          if (today == id(daily_counters_day)) return;
+          // Unset (first boot with this): today's counts are today's.
+          if (id(daily_counters_day) != 0) {
+            for (int i = 0; i < 5; i++) {
+              id(cat_daily_visits)[i] = 0;
+              id(cat_daily_pees)[i] = 0;
+              id(cat_daily_poops)[i] = 0;
+            }
+          }
+          id(daily_counters_day) = today;
+
   # Push the box thresholds into the tracker. Runs at boot and whenever the
   # Empty Box Weight setting changes.
   - id: configure_box_monitor
@@ -958,7 +984,7 @@ script:
       - lambda: !lambda |-
           if (id(event_open)) return;
           id(event_open) = true;
-          id(event_start) = id(homeassistant_time).now().timestamp;
+          id(event_start) = millis();
           get_analyzer().init(id(cat_weights), 5);
           get_weight_buf().reset();
           get_analyzer().attach_buffer(&get_weight_buf());
@@ -978,7 +1004,7 @@ script:
           id(event_open) = false;
 
           time_t now = id(homeassistant_time).now().timestamp;
-          int duration = now - id(event_start);
+          int duration = (millis() - id(event_start)) / 1000;
           int samples = get_sample_idx();
           bool long_enough = duration >= 10 && samples >= 100;
           // Where the scale sits now, relative to the start of the event.
@@ -1233,7 +1259,10 @@ script:
                 id(calibration_tare) = id(calibration_tare_temp);
                 id(calibration_coefficient) = new_coefficient;
                 id(calibration_tare_temp) = 0;
-                id(calibration_timestamp) = id(homeassistant_time).now().timestamp;
+                // Unsynced clock reads as seconds-since-boot. Unknown beats 1970.
+                auto now = id(homeassistant_time).now();
+                id(calibration_timestamp) = now.is_valid() ? now.timestamp : 0;
+                if (!now.is_valid()) ESP_LOGW("calibration", "Clock not synced; calibration date not recorded");
                 id(calibration_last_performed).update();
 
                 ESP_LOGI("calibration", "New tare: %.2f, New coefficient: %.2f", id(calibration_tare), new_coefficient);
