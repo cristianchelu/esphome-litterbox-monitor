@@ -281,7 +281,9 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: !lambda return id(cat_weights)[0];
+    # 0 is the "not set" marker everywhere else; unknown until set_cat_weight
+    # gives this cat a weight (visits only refine a weight that's already set).
+    lambda: !lambda 'return id(cat_weights)[0] > 0.0f ? id(cat_weights)[0] : NAN;'
     internal: False
     update_interval: 1s
   - platform: template
@@ -292,7 +294,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: !lambda return id(cat_weights)[1];
+    lambda: !lambda 'return id(cat_weights)[1] > 0.0f ? id(cat_weights)[1] : NAN;'
     internal: ${cats|length <= 1 or cats[1] == ""}
     update_interval: 1s
   - platform: template
@@ -303,7 +305,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: !lambda return id(cat_weights)[2];
+    lambda: !lambda 'return id(cat_weights)[2] > 0.0f ? id(cat_weights)[2] : NAN;'
     internal: ${cats|length <= 2 or cats[2] == ""}
     update_interval: 1s
   - platform: template
@@ -314,7 +316,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: !lambda return id(cat_weights)[3];
+    lambda: !lambda 'return id(cat_weights)[3] > 0.0f ? id(cat_weights)[3] : NAN;'
     internal: ${cats|length <= 3 or cats[3] == ""}
     update_interval: 1s
   - platform: template
@@ -325,7 +327,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     unit_of_measurement: kg
-    lambda: !lambda return id(cat_weights)[4];
+    lambda: !lambda 'return id(cat_weights)[4] > 0.0f ? id(cat_weights)[4] : NAN;'
     internal: ${cats|length <= 4 or cats[4] == ""}
     update_interval: 1s
   - platform: template
@@ -619,14 +621,6 @@ sensor:
     id: waste_weight
     accuracy_decimals: 0
     icon: "mdi:emoticon-poop"
-  - platform: template
-    name: "Cat Weight"
-    id: current_cat_weight
-    entity_category: diagnostic
-    accuracy_decimals: 2
-    unit_of_measurement: kg
-    icon: "mdi:scale-bathroom"
-    disabled_by_default: True
   - platform: template
     unit_of_measurement: kg
     id: litter_weight
@@ -1065,7 +1059,6 @@ script:
             const StateResult &result = *visit;
             id(elimination_type_sensor).publish_state(
                 elimination_type_str(result.elimination_type));
-            id(current_cat_weight).publish_state(result.cat_weight / 1000.0f);
             id(event_duration_sensor).publish_state(duration);
 
             // Publish std dev of the single elimination period
@@ -1188,7 +1181,6 @@ script:
           }
 
           id(cat_detected).publish_state(false);
-          id(current_cat_weight).publish_state(0);
           id(event_start) = 0;
           if (box.kind != BoxEventKind::NONE) {
             id(maintenance_event).trigger(box_event_str(box.kind));
@@ -1211,7 +1203,6 @@ script:
           id(event_open) = false;
           id(suppress_visit) = false;
           id(cat_detected).publish_state(false);
-          id(current_cat_weight).publish_state(0);
           id(tare_value) = id(hx711_raw_value).state;
           id(auto_tare_value) = 0;
           id(event_start) = 0;
