@@ -982,41 +982,66 @@ button:
                 known_weight_kg: !lambda return id(calibration_known_weight).state / 1000.0;
 
 script:
-  # After a reboot, put the running totals back only if nothing happened to
-  # the box while the monitor was off, judged like a box taken off and put
-  # back: within min_clean_event_weight..lift_return_tolerance of the last
-  # tare, nothing changed. Lighter than that was a scoop, so the totals
-  # restart. Heavier was a visit or a top-up it didn't see, so they stay
-  # unknown until the next clean, as before.
+  # After a reboot, put the running totals back only if nothing can have
+  # happened to the box while the monitor was off.
+  #
+  # A software restart (an update, the Restart button, a crash) is back within
+  # seconds, so they come straight back. After a power cut the box is judged
+  # against the last tare: within min_clean_event_weight either way, nothing
+  # changed. Lighter than that was a scoop, so the totals restart. Heavier was
+  # a visit or a top-up it didn't see (a visit's waste is often well under
+  # lift_return_tolerance), so they stay unknown until the next clean.
   - id: restore_totals
     then:
-      - wait_until:
+      - if:
           condition:
-            lambda: 'return get_box_monitor().ready() && !id(vibration_detected).state && !std::isnan(id(hx711_raw_value).state);'
-          timeout: 60s
-      - lambda: !lambda |-
-          float raw_kg = id(hx711_raw_value).state;
-          if (!get_box_monitor().ready() || id(vibration_detected).state || std::isnan(raw_kg)) {
-            ESP_LOGW("totals", "No steady reading after boot; totals stay unknown");
-            return;
-          }
-          float delta_g = (raw_kg - id(tare_value) - id(auto_tare_value)) * 1000.0f;
-          if (delta_g >= ${min_clean_event_weight} && delta_g <= ${lift_return_tolerance}) {
-            ESP_LOGI("totals", "Box unchanged while off (%+.0f g): totals restored", delta_g);
-            if (!std::isnan(id(saved_visits))) id(visits).publish_state(id(saved_visits));
-            if (!std::isnan(id(saved_waste_weight))) id(waste_weight).publish_state(id(saved_waste_weight));
-            if (!std::isnan(id(saved_litter_weight))) id(litter_weight).publish_state(id(saved_litter_weight));
-          } else if (delta_g < ${min_clean_event_weight}) {
-            ESP_LOGI("totals", "Box %.0f g lighter than before it went off: scooped", -delta_g);
-            id(visits).publish_state(0);
-            id(waste_weight).publish_state(0);
-            id(litter_weight).publish_state(raw_kg - id(litterbox_weight).state / 1000.0f);
-            id(tare_value) = raw_kg;
-            id(auto_tare_value) = 0;
-          } else {
-            ESP_LOGI("totals", "Box %.0f g heavier than before it went off: totals unknown until the next clean", delta_g);
-          }
+            lambda: |-
+              switch (esp_reset_reason()) {
+                case ESP_RST_SW: case ESP_RST_PANIC: case ESP_RST_INT_WDT:
+                case ESP_RST_TASK_WDT: case ESP_RST_WDT:
+                  return true;
+                default:
+                  return false;
+              }
+          then:
+            - logger.log:
+                level: INFO
+                tag: totals
+                format: "Software restart: totals restored"
+            - script.execute: put_back_totals
+          else:
+            - wait_until:
+                condition:
+                  lambda: 'return get_box_monitor().ready() && !id(vibration_detected).state && !std::isnan(id(hx711_raw_value).state);'
+                timeout: 60s
+            - lambda: !lambda |-
+                float raw_kg = id(hx711_raw_value).state;
+                if (!get_box_monitor().ready() || id(vibration_detected).state || std::isnan(raw_kg)) {
+                  ESP_LOGW("totals", "No steady reading after power-up; totals stay unknown");
+                  return;
+                }
+                const float floor_g = -(${min_clean_event_weight});
+                float delta_g = (raw_kg - id(tare_value) - id(auto_tare_value)) * 1000.0f;
+                if (delta_g >= -floor_g && delta_g <= floor_g) {
+                  ESP_LOGI("totals", "Box unchanged while off (%+.0f g): totals restored", delta_g);
+                  id(put_back_totals).execute();
+                } else if (delta_g < -floor_g) {
+                  ESP_LOGI("totals", "Box %.0f g lighter than before it went off: scooped", -delta_g);
+                  id(visits).publish_state(0);
+                  id(waste_weight).publish_state(0);
+                  id(litter_weight).publish_state(raw_kg - id(litterbox_weight).state / 1000.0f);
+                  id(tare_value) = raw_kg;
+                  id(auto_tare_value) = 0;
+                } else {
+                  ESP_LOGI("totals", "Box %.0f g heavier than before it went off: totals unknown until the next clean", delta_g);
+                }
       - component.update: litter_level
+  - id: put_back_totals
+    then:
+      - lambda: !lambda |-
+          if (!std::isnan(id(saved_visits))) id(visits).publish_state(id(saved_visits));
+          if (!std::isnan(id(saved_waste_weight))) id(waste_weight).publish_state(id(saved_waste_weight));
+          if (!std::isnan(id(saved_litter_weight))) id(litter_weight).publish_state(id(saved_litter_weight));
 
   # Zero the daily counters once the date has moved on. Runs at midnight and
   # on every clock sync, so a midnight spent powered off still gets its reset.
