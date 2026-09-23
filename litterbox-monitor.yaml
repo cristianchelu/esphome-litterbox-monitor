@@ -811,6 +811,7 @@ number:
     unit_of_measurement: "d"
     optimistic: true
     initial_value: "30"
+    restore_value: True
     entity_category: config
   - platform: template
     name: "Calibration Known Weight"
