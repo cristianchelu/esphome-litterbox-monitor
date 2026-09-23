@@ -109,6 +109,22 @@ globals:
     type: time_t
     initial_value: "0"
     restore_value: True
+  # Last published value of the running totals below. Those sensors only
+  # publish on events and add onto their previous value, so after a reboot
+  # they are NAN (and NAN + 1 stays NAN until the next clean). See
+  # restore_totals for when they are put back.
+  - id: saved_visits
+    type: float # count
+    initial_value: "NAN"
+    restore_value: True
+  - id: saved_waste_weight
+    type: float # g
+    initial_value: "NAN"
+    restore_value: True
+  - id: saved_litter_weight
+    type: float # kg
+    initial_value: "NAN"
+    restore_value: True
 
 
   ## Event-related state variables
@@ -190,6 +206,7 @@ esphome:
       # unpublished until the first visit ended. With no event open it is
       # empty by definition, so say so rather than leaving it unknown.
       - lambda: 'id(state_machine_state).publish_state("empty");'
+      - script.execute: restore_totals
 
 esp32:
   board: esp32dev
@@ -616,6 +633,8 @@ sensor:
   - platform: template
     unit_of_measurement: g
     name: "Waste Weight"
+    on_value:
+      - lambda: 'if (!std::isnan(x)) id(saved_waste_weight) = x;'
     id: waste_weight
     accuracy_decimals: 0
     icon: "mdi:emoticon-poop"
@@ -633,6 +652,8 @@ sensor:
     name: "Litter Remaining"
     icon: "mdi:tray-full"
     accuracy_decimals: 2
+    on_value:
+      - lambda: 'if (!std::isnan(x)) id(saved_litter_weight) = x;'
   # Litter remaining as a share of a full box.
   - platform: template
     id: litter_level
@@ -689,6 +710,8 @@ sensor:
     accuracy_decimals: 0
     update_interval: never
     state_class: measurement
+    on_value:
+      - lambda: 'if (!std::isnan(x)) id(saved_visits) = x;'
   # NAN until the first reset ("0 days" would claim a deadline nobody set),
   # fractional so the last day still counts down, negative once overdue —
   # clamping at 0 made "expired yesterday" and "expired last month" read
@@ -959,6 +982,42 @@ button:
                 known_weight_kg: !lambda return id(calibration_known_weight).state / 1000.0;
 
 script:
+  # After a reboot, put the running totals back only if nothing happened to
+  # the box while the monitor was off, judged like a box taken off and put
+  # back: within min_clean_event_weight..lift_return_tolerance of the last
+  # tare, nothing changed. Lighter than that was a scoop, so the totals
+  # restart. Heavier was a visit or a top-up it didn't see, so they stay
+  # unknown until the next clean, as before.
+  - id: restore_totals
+    then:
+      - wait_until:
+          condition:
+            lambda: 'return get_box_monitor().ready() && !id(vibration_detected).state && !std::isnan(id(hx711_raw_value).state);'
+          timeout: 60s
+      - lambda: !lambda |-
+          float raw_kg = id(hx711_raw_value).state;
+          if (!get_box_monitor().ready() || id(vibration_detected).state || std::isnan(raw_kg)) {
+            ESP_LOGW("totals", "No steady reading after boot; totals stay unknown");
+            return;
+          }
+          float delta_g = (raw_kg - id(tare_value) - id(auto_tare_value)) * 1000.0f;
+          if (delta_g >= ${min_clean_event_weight} && delta_g <= ${lift_return_tolerance}) {
+            ESP_LOGI("totals", "Box unchanged while off (%+.0f g): totals restored", delta_g);
+            if (!std::isnan(id(saved_visits))) id(visits).publish_state(id(saved_visits));
+            if (!std::isnan(id(saved_waste_weight))) id(waste_weight).publish_state(id(saved_waste_weight));
+            if (!std::isnan(id(saved_litter_weight))) id(litter_weight).publish_state(id(saved_litter_weight));
+          } else if (delta_g < ${min_clean_event_weight}) {
+            ESP_LOGI("totals", "Box %.0f g lighter than before it went off: scooped", -delta_g);
+            id(visits).publish_state(0);
+            id(waste_weight).publish_state(0);
+            id(litter_weight).publish_state(raw_kg - id(litterbox_weight).state / 1000.0f);
+            id(tare_value) = raw_kg;
+            id(auto_tare_value) = 0;
+          } else {
+            ESP_LOGI("totals", "Box %.0f g heavier than before it went off: totals unknown until the next clean", delta_g);
+          }
+      - component.update: litter_level
+
   # Zero the daily counters once the date has moved on. Runs at midnight and
   # on every clock sync, so a midnight spent powered off still gets its reset.
   - id: roll_daily_counters
