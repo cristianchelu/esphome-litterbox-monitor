@@ -817,14 +817,16 @@ number:
     id: calibration_known_weight
     icon: mdi:weight-kilogram
     min_value: 1000
-    max_value: 10000
-    step: 100
+    # Up to the 40 kg the weight filter accepts; gram steps so the weights
+    # can be entered exactly as measured.
+    max_value: 40000
+    step: 1
     mode: box
     unit_of_measurement: "g"
     optimistic: true
     initial_value: "1000"
     entity_category: config
-    restore_value: False
+    restore_value: True
   - platform: template
     name: "Classification Threshold"
     id: elimination_std_dev_threshold
