@@ -168,7 +168,8 @@ That's it — the monitor is ready to use.
 ### Sensors and Entities
 
 - **Cat 1-5 Weight:** Last weight stored for each cat when PoopSense identifies
-  them on a visit (only enabled cats are visible).
+  them on a visit (only enabled cats are visible). Unknown until set with
+  `set_cat_weight`.
 - **Cat 1-5 Daily Visits:** Number of visits per day for each cat (only enabled cats are visible).
 - **Cat 1-5 Daily Pee:** Number of urination events today for each cat (only enabled cats are visible).
 - **Cat 1-5 Daily Poops:** Number of defecation events today for each cat (only enabled cats are visible).
@@ -191,8 +192,6 @@ That's it — the monitor is ready to use.
   `lifted` (the whole monitor was picked up and put back) once the counters
   have been updated. Use it as an automation trigger.
   [How it works ->](docs/BOX_TRACKING.md)
-- **Cat Weight:** Diagnostic sensor (disabled by default) showing the cat weight
-  in kg from the last PoopSense result.
 - **Elimination Std Dev:** Diagnostic; the standard deviation (grams) of the
   elimination window PoopSense classified last. Compare it with the
   Classification Threshold when tuning.
