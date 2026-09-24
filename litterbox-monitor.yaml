@@ -1071,16 +1071,21 @@ script:
           // inert, and that is the stronger evidence.
           if (visit != nullptr && box.kind == BoxEventKind::NONE) {
             const StateResult &result = *visit;
-            id(elimination_type_sensor).publish_state(
-                elimination_type_str(result.elimination_type));
-            id(event_duration_sensor).publish_state(duration);
+            // A continued event is the second half of a visit the timeout
+            // split: the cat leaving. It only adds waste; the result stays the
+            // first half's, which the daily counts were taken from.
+            if (!continued) {
+              id(elimination_type_sensor).publish_state(
+                  elimination_type_str(result.elimination_type));
+              id(event_duration_sensor).publish_state(duration);
 
-            // Publish std dev of the single elimination period
-            for (int i = 0; i < result.period_count; i++) {
-              if (result.periods[i].state == AnalyzerState::ELIMINATING &&
-                  result.periods[i].std_dev >= 0.0f) {
-                id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
-                break;
+              // Publish std dev of the single elimination period
+              for (int i = 0; i < result.period_count; i++) {
+                if (result.periods[i].state == AnalyzerState::ELIMINATING &&
+                    result.periods[i].std_dev >= 0.0f) {
+                  id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
+                  break;
+                }
               }
             }
 
