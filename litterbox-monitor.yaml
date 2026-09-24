@@ -1163,6 +1163,8 @@ script:
             if (heavy && !continued && id(activity_detected).state) {
               cat_inside = true;
               ESP_LOGI("SA", "%.2f kg still on the scale, waiting for it to leave", end_tared_kg);
+              // Counted now, once: the event after this is the cat leaving.
+              id(visits).publish_state(id(visits).state + 1);
             } else if (heavy) {
               ESP_LOGW("SA", "%.2f kg sat through two timeouts; taring without counting waste", end_tared_kg);
             } else {
