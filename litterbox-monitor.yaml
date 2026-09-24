@@ -930,6 +930,48 @@ button:
           }
       - component.update: litter_life_left
       - component.update: deep_clean_due
+  # Weigh the empty box instead of typing its weight in.
+  - platform: template
+    name: "Set Empty Box Weight"
+    icon: "mdi:tray"
+    entity_category: config
+    on_press:
+      - wait_until:
+          condition:
+            binary_sensor.is_off: vibration_detected
+          timeout: 10s
+      - lambda: !lambda |-
+          float g = id(hx711_raw_value).state * 1000.0f;
+          if (id(vibration_detected).state || std::isnan(g)) {
+            ESP_LOGW("box", "Empty Box Weight not set: reading isn't stable");
+            return;
+          }
+          // A bare board, or more than the setting allows: not an empty box.
+          if (g < ${box_off_tolerance} || g > 10000.0f) {
+            ESP_LOGW("box", "Empty Box Weight not set: %.0f g isn't an empty box", g);
+            return;
+          }
+          auto call = id(litterbox_weight).make_call();
+          call.set_value(roundf(g));
+          call.perform();
+          ESP_LOGI("box", "Empty Box Weight set to %.0f g", roundf(g));
+  # Take what's in the box now as 100% for Litter Level.
+  - platform: template
+    name: "Set Full Litter Weight"
+    icon: "mdi:tray-full"
+    entity_category: config
+    on_press:
+      - lambda: !lambda |-
+          float kg = id(litter_weight).state;
+          if (std::isnan(kg) || kg <= 0.0f || kg > 20.0f) {
+            ESP_LOGW("litter", "Full Litter Weight not set: Litter Remaining is %.2f kg", kg);
+            return;
+          }
+          auto call = id(litter_full_weight).make_call();
+          call.set_value(roundf(kg * 10.0f) / 10.0f);  // the entity's 0.1 kg step
+          call.perform();
+          ESP_LOGI("litter", "Full Litter Weight set to %.1f kg", roundf(kg * 10.0f) / 10.0f);
+      - component.update: litter_level
   - platform: template
     name: "Reset Clean"
     icon: mdi:reload
