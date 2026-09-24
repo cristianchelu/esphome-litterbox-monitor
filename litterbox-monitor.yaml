@@ -1169,15 +1169,16 @@ script:
             if (heavy && !continued && id(activity_detected).state) {
               cat_inside = true;
               ESP_LOGI("SA", "%.2f kg still on the scale, waiting for it to leave", end_tared_kg);
-              // Counted now, once: the event after this is the cat leaving.
-              id(visits).publish_state(id(visits).state + 1);
             } else if (heavy) {
               ESP_LOGW("SA", "%.2f kg sat through two timeouts; taring without counting waste", end_tared_kg);
-            } else {
-              if (end_tared_kg > 0.0f) {
-                id(waste_weight).publish_state(id(waste_weight).state + end_tared_kg * 1000.0f);
-              }
-              if (!continued) id(visits).publish_state(id(visits).state + 1);
+            } else if (end_tared_kg > 0.0f) {
+              id(waste_weight).publish_state(id(waste_weight).state + end_tared_kg * 1000.0f);
+            }
+            // A visit is a recognised cat, counted once: in the event that
+            // recognised it, also when the timeout closed that with the cat
+            // still inside (the event after is it leaving).
+            if (cat_event && !continued) {
+              id(visits).publish_state(id(visits).state + 1);
             }
           }
 
