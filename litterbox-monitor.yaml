@@ -260,7 +260,8 @@ time:
     timezone: ${timezone}
     id: homeassistant_time
     on_time_sync:
-      # The countdown is NAN until the clock is valid; don't wait a minute more.
+      # The countdown reads NAN until the clock is valid: refresh it now
+      # rather than at its next update.
       - component.update: litter_life_left
       # Catch up on a midnight missed while powered off or without a clock.
       - script.execute: roll_daily_counters
