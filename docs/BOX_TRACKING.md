@@ -42,7 +42,8 @@ things:
 When an event ends, before the tare moves, the first rule that fits wins:
 
 1. **Box still absent.** No verdict yet. Tare stays where it was.
-2. **Box came back empty** (within 150 g of Empty Box Weight, held 3 s)
+2. **Box came back empty** (within 150 g of Empty Box Weight, with its lid
+   or, if Lid Weight is set, without it; held 3 s)
    → `deep_clean`. Litter weight becomes whatever has gone in since, waste
    and visits reset, deep-clean timer restarts.
 3. **Monitor lifted and set back** within 100 g of where it was → `lifted`.
@@ -51,8 +52,11 @@ When an event ends, before the tare moves, the first rule that fits wins:
    event, at least 300 g gained, last 30 s inert → `top_up`, measured from
    that lowest point. If the lowest point is a scoop's worth below where the
    event started, a `scoop` is reported alongside.
-6. **At least 20 g lighter, no cat matched**, and either the event ran 30 s
-   or the box left the board → `scoop`.
+6. **At least 20 g lighter, no cat matched**, and either the event ran 30 s,
+   the box left the board, or its lid came off → `scoop`.
+
+With a Lid Weight set, every level in these rules is taken as if the lid
+were on (see [Boxes with a lid](#boxes-with-a-lid)).
 
 Otherwise it's a plain cat visit (or nothing). A maintenance verdict
 overrides the cat analysis: if a bag went inert on the scale, it was a bag,
@@ -69,10 +73,38 @@ reads is drift, and it gets folded into the calibration offset. Published as
 board more than 300 g from zero is left alone on the assumption something
 is wedged under it.
 
+### Boxes with a lid
+
+A top-entry box has a lid that comes off to scoop or pour. Without knowing
+it, the tracker reads the lid coming off as litter leaving: a top-up is
+measured from the lowest point, which is the box without its lid, so Litter
+Added comes out a lid too high and a scoop is reported alongside. And if the
+event ends while the lid is off, the scale tares there and the lid going
+back on lands in Waste Weight.
+
+Set the lid's weight in Lid Weight, next to Empty Box Weight (0, the
+default, is no lid). Empty Box Weight is then the box with its lid on. The
+lid comes off and goes back as one step of about that weight between steady
+levels, where a scoop comes out in small drops and litter pours in as a
+ramp, so a step within `lid_tolerance` (30 g) of it is the lid. A lid's
+weight doesn't change the way a cat's does, so the window is fixed, like the
+empty box's, rather than a share of it. Every level measured with the lid
+off is counted as if it were on, the lid's state carries over into the next
+event, and taking it off counts as opening the box, like lifting the box off
+(no minimum duration for a scoop). An empty box also counts for a deep clean
+with its lid on or off.
+
+The lid has to sit still, off or on, for about two seconds to be seen: a
+lid lifted and put straight back is just a wobble, which is harmless. Keep
+the box and lid clear of walls: a lid catching on one moved the reading by
+up to 30 g, where clear of it the level with the lid on came back within a
+couple of grams.
+
 All thresholds are substitutions at the top of the YAML:
 `box_off_tolerance`, `box_empty_tolerance`, `monitor_lift_threshold`,
-`lift_return_tolerance`, `min_top_up_weight`, `top_up_settle_time`, plus
-`min_clean_event_weight` and `min_clean_event_duration` for scoops.
+`lift_return_tolerance`, `min_top_up_weight`, `top_up_settle_time`,
+`lid_tolerance`, plus `min_clean_event_weight` and `min_clean_event_duration`
+for scoops.
 
 ## Troubleshooting
 

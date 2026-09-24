@@ -60,6 +60,12 @@ substitutions:
   # back kilograms heavier.
   box_empty_tolerance: "150" # g
 
+  # A step within this of Lid Weight, between steady levels, is the lid
+  # coming off or going back. A lid weighs the same every time, so a fixed
+  # window, like box_empty_tolerance. A lid catching on a wall can throw a
+  # step off by tens of grams.
+  lid_tolerance: "30" # g
+
   # Reading more negative than this means the monitor itself is in the air
   # (the frame hangs from the cells). Nothing else reads below zero.
   monitor_lift_threshold: "1000" # g
@@ -851,6 +857,24 @@ number:
     restore_value: True
     on_value:
       - script.execute: configure_box_monitor
+  # A lid that comes off to scoop or pour: its weight, so taking it off
+  # isn't a scoop and putting it back isn't waste. 0 = no lid.
+  - platform: template
+    name: "Lid Weight"
+    id: lid_weight
+    icon: "mdi:tray-arrow-up"
+    device_class: weight
+    unit_of_measurement: g
+    entity_category: config
+    optimistic: true
+    min_value: 0
+    max_value: 2000
+    step: 1
+    mode: box
+    initial_value: "0"
+    restore_value: True
+    on_value:
+      - script.execute: configure_box_monitor
   # What "100%" means for the litter level. 0 leaves that sensor unknown.
   - platform: template
     name: "Full Litter Weight"
@@ -983,12 +1007,15 @@ script:
           cfg.box_g = std::isnan(box_g) ? 0.0f : box_g;
           cfg.off_tol_g = ${box_off_tolerance};
           cfg.empty_tol_g = ${box_empty_tolerance};
+          cfg.lid_tol_g = ${lid_tolerance};
           cfg.lift_g = ${monitor_lift_threshold};
           cfg.return_tol_g = ${lift_return_tolerance};
           cfg.top_up_min_g = ${min_top_up_weight};
           cfg.scoop_min_g = -(${min_clean_event_weight});
           cfg.scoop_min_s = ${min_clean_event_duration};
           cfg.settle_s = ${top_up_settle_time};
+          float lid_g = id(lid_weight).state;
+          cfg.lid_g = std::isnan(lid_g) ? 0.0f : lid_g;
           get_box_monitor().configure(cfg);
 
   # Start recording: activity just began, or the previous event closed while
@@ -1044,14 +1071,17 @@ script:
           // What happened to the box, judged on the absolute level. A
           // continued event is a cat leaving, never a scoop.
           const BoxEvent &box = get_box_monitor().finalize(duration, cat_event || continued);
+          // The lid going back on is not waste (nor a cat still inside), and
+          // taking it off is not a loss.
+          end_tared_kg -= box.lid_delta_g / 1000.0f;
           float zero_g = box.zero_valid ? box.zero_error_g : 0.0f;
           float zero_kg = zero_g / 1000.0f;
           float level_kg = (box.level_g - zero_g) / 1000.0f;
           float box_kg = id(litterbox_weight).state / 1000.0f;
-          ESP_LOGI("BOX", "Event: %s level=%.0fg added=%.0fg box=%.0fg zero=%.0fg%s absent=%d",
+          ESP_LOGI("BOX", "Event: %s level=%.0fg added=%.0fg box=%.0fg zero=%.0fg%s absent=%d lid=%s%+.0fg",
                    box_event_str(box.kind), box.level_g, box.litter_added_g,
                    box.box_measured_g, zero_g, box.zero_valid ? "" : " (unchecked)",
-                   (int) box.absent);
+                   (int) box.absent, box.lid_off ? "off" : "on", box.lid_delta_g);
 
           // Maintenance outranks the visit analysis: a bag that happens to
           // weigh what a cat does matches the cat by weight, but it went
