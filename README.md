@@ -177,7 +177,8 @@ That's it — the monitor is ready to use.
   `urination`, `defecation`, `both`, or `unknown` after each analyzed activity.
 - **Event Duration:** Seconds for the activity window that was analyzed (updated
   when PoopSense runs at the end of activity).
-- **Waste Weight:** Estimated total accumulated waste (grams) since last clean.
+- **Waste Weight:** Estimated total waste (grams) left by recognised cats since
+  last clean.
 - **Litter Remaining:** Estimated remaining litter (kg).
 - **Litter Level:** The same estimate as a percentage of "Full Litter Weight".
   Unavailable until you set that number.

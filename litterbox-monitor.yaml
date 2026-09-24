@@ -1171,7 +1171,10 @@ script:
               ESP_LOGI("SA", "%.2f kg still on the scale, waiting for it to leave", end_tared_kg);
             } else if (heavy) {
               ESP_LOGW("SA", "%.2f kg sat through two timeouts; taring without counting waste", end_tared_kg);
-            } else if (end_tared_kg > 0.0f) {
+            } else if (end_tared_kg > 0.0f && (cat_event || continued)) {
+              // Waste is what a cat left. Without one the difference is a box
+              // nudged or sitting a little differently, not waste. A continued
+              // event is the cat leaving.
               id(waste_weight).publish_state(id(waste_weight).state + end_tared_kg * 1000.0f);
             }
             // A visit is a recognised cat, counted once: in the event that
