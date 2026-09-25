@@ -18,22 +18,22 @@ static const int SA_MAX_ZONES = 256;
 static const float SA_URINATION_STD_DEV_THRESHOLD_G = 4.0f;
 static const int16_t SA_SCALE_ABS = 1;    // 1g, identical to previous behavior
 static const int16_t SA_SCALE_DELTA = 10; // 0.1g, used during OCCUPIED/ELIMINATING
-/** Room after a full buffer for the text trailer (see visit_blob.h). */
-static const int SA_FRAME_TAIL = 24 * 1024;
-
 /**
- * The buffer's storage, laid out as the record that leaves the device: an
- * 8-byte header, the raw int16 codes, then room for a text trailer written
- * when the visit ends. Shipping it is a pointer and a length into this
- * struct; nothing is copied. visit_blob.h owns the header and trailer.
+ * Samples the buffer keeps in RAM. On the device the rest of a long visit
+ * is read back from its journal entry on flash (see WeightBuffer), so this
+ * only has to cover what the journal has not written yet: 4096 samples is
+ * almost 7 minutes against a 2 KB chunk every ~100 s. Off the device
+ * (replay, tests) the whole visit stays in RAM.
  */
-struct VisitFrame {
-  char magic[4];
-  uint32_t count;
-  int16_t samples[SA_MAX_SAMPLES];
-  char tail[SA_FRAME_TAIL];
-};
-static_assert(sizeof(VisitFrame) == 8 + 2 * SA_MAX_SAMPLES + SA_FRAME_TAIL, "frame must be packed");
+#ifndef SA_RING_SAMPLES
+#ifdef ESP_PLATFORM
+#define SA_RING_SAMPLES 4096
+#else
+#define SA_RING_SAMPLES SA_MAX_SAMPLES
+#endif
+#endif
+static const int SA_RING = SA_RING_SAMPLES;
+static_assert(SA_RING > 0 && SA_RING <= SA_MAX_SAMPLES, "ring size");
 
 /**
  * Scratch for median-RMS over eliminating windows.
@@ -163,10 +163,19 @@ class Ring {
 //
 // The buffer is the record of the visit: the analyzer consumes what push()
 // returns, so the raw samples plus the zone table replay it exactly.
+//
+// Storage is a ring of the last SA_RING samples. Older ones are read from
+// `backing`, the visit's samples as the journal wrote them (memory-mapped
+// flash on the device), which covers the first `durable` samples. A sample
+// that leaves the ring before it is durable is lost, and the visit with it:
+// complete() goes false and the caller must not analyse or ship it.
 class WeightBuffer {
  public:
   void reset() {
     count_ = 0;
+    lost_ = false;
+    backing_ = nullptr;
+    durable_ = 0;
     zone_count_ = 0;
     current_zone_ = -1;
     begin_absolute_zone();
@@ -203,31 +212,70 @@ class WeightBuffer {
     // Round, don't truncate: a decoded value re-encodes to the same code,
     // so a replay that pushes decoded grams rebuilds this buffer exactly.
     int16_t enc = static_cast<int16_t>(lroundf(std::max(-32768.0f, std::min(32767.0f, val))));
-    frame_.samples[count_++] = enc;
+    // The slot about to be reused holds sample count_ - SA_RING.
+    if (count_ >= SA_RING && (backing_ == nullptr || count_ - SA_RING >= durable_)) lost_ = true;
+    ring_[count_ % SA_RING] = enc;
+    count_++;
     return decode_(enc, *z);
   }
 
-  /** Rebuild verbatim from a published record (raw codes plus zone table). */
+  /**
+   * Rebuild verbatim from a published record (raw codes plus zone table).
+   * `samples` must outlive the buffer when the record is longer than the ring.
+   */
   void restore(const int16_t *samples, int n, const ZoneEntry *zones, int nz) {
     count_ = std::min(n, SA_MAX_SAMPLES);
-    memcpy(frame_.samples, samples, count_ * sizeof(int16_t));
+    lost_ = false;
+    backing_ = samples;
+    durable_ = count_;
+    int first = std::max(0, count_ - SA_RING);
+    for (int i = first; i < count_; i++) ring_[i % SA_RING] = samples[i];
     zone_count_ = std::min(nz, SA_MAX_ZONES);
     memcpy(zones_, zones, zone_count_ * sizeof(ZoneEntry));
     current_zone_ = zone_count_ - 1;
   }
 
+  /**
+   * Where samples that have left the ring can be read, and how many of them
+   * are there. Null when there is nowhere (no journal, or it gave up).
+   */
+  void set_backing(const int16_t *samples, int durable) {
+    backing_ = samples;
+    durable_ = samples ? durable : 0;
+  }
+
+  /** Every sample can still be read: the visit can be analysed and shipped. */
+  bool complete() const { return !lost_ && (count_ <= SA_RING || backing_ != nullptr); }
+
   int count() const { return count_; }
   int zone_count() const { return zone_count_; }
   const ZoneEntry &zone(int i) const { return zones_[i]; }
-  int16_t raw_sample(int idx) const { return frame_.samples[idx]; }
-  VisitFrame &frame() { return frame_; }
-  const VisitFrame &frame() const { return frame_; }
+  int16_t raw_sample(int idx) const {
+    if (idx >= count_ - SA_RING) return ring_[idx % SA_RING];
+    return backing_ ? backing_[idx] : 0;
+  }
+
+  /**
+   * Frame bytes still held in RAM, for the journal to copy out: the samples
+   * start at frame offset 8 (after "LBV1" and the count). Returns a pointer
+   * to the byte at `off` and how many follow it contiguously, or null when
+   * that sample has left the ring.
+   */
+  const uint8_t *frame_bytes(uint32_t off, uint32_t *avail) const {
+    *avail = 0;
+    if (off < 8 || (off & 1)) return nullptr;
+    int s = static_cast<int>((off - 8) / 2);
+    if (s >= count_ || s < count_ - SA_RING) return nullptr;
+    int pos = s % SA_RING;
+    *avail = 2 * static_cast<uint32_t>(std::min(SA_RING - pos, count_ - s));
+    return reinterpret_cast<const uint8_t *>(&ring_[pos]);
+  }
 
   /** Grams the analyzer saw for sample `idx`. */
   float sample_to_grams(int idx) const {
     const ZoneEntry *z = zone_for_index(idx);
     if (!z || idx < 0 || idx >= count_) return 0.0f;
-    return decode_(frame_.samples[idx], *z);
+    return decode_(raw_sample(idx), *z);
   }
 
   /**
@@ -296,8 +344,11 @@ class WeightBuffer {
     return sqrtf(sq / static_cast<float>(n));
   }
 
-  VisitFrame frame_;
+  int16_t ring_[SA_RING];
   int count_ = 0;
+  bool lost_ = false;
+  const int16_t *backing_ = nullptr;
+  int durable_ = 0;
   ZoneEntry zones_[SA_MAX_ZONES];
   int zone_count_ = 0;
   int current_zone_ = -1;

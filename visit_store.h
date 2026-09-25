@@ -3,15 +3,18 @@
 //
 // The journal follows the visit instead of copying it out afterwards. At
 // begin_event an entry is opened; every step() programs whatever whole
-// chunk of the RAM frame has accumulated since (2 KB every ~100 s at
-// 10 Hz, a few ms each); at end_event only the last partial chunk and the
-// trailer are left, so the frame is on flash before end_event returns and
-// the buffer is free for the next visit with nothing to wait for. Flash
-// bits only clear, so the header is written with an all-ones length at
-// open and finished at close without an erase.
+// chunk of samples has accumulated in the buffer's RAM ring since (2 KB
+// every ~100 s at 10 Hz, ~10 ms each on the original ESP32). That keeps
+// the ring small: the analyzer reads older samples back from the entry
+// through the mapping (samples_on_flash()). At end_event drain() writes
+// the last partial chunk, the trailer is append()ed after it, and close()
+// finishes the headers, so the frame is on flash before end_event returns
+// and the buffer is free for the next visit with nothing to wait for.
+// Flash bits only clear, so the header is written with an all-ones length
+// at open and finished at close without an erase.
 //
 // Sectors ahead of the writer are blanked on quiet steps, so the writes
-// that happen during a visit are programs only, a few ms each.
+// that happen during a visit are programs only, never an erase.
 //
 // Nothing here blocks the loop task longer than one sector op, and the
 // network never touches it: a shipper task publishes entries from a
@@ -34,6 +37,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -43,7 +47,7 @@ class VisitStore {
  public:
   static const uint32_t SECTOR = 4096;
   static const uint32_t MAX_SECTORS = 256;   // 1 MB partition; the index is sized for it
-  static const uint32_t MAX_ENTRY = 24;      // sectors a full frame (header + 36000 samples + trailer) spans
+  static const uint32_t MAX_ENTRY = 24;      // sectors a full frame spans: 36000 samples and ~26 KB of trailer room
   static const uint32_t ERASE_AHEAD = 8;     // kept blank in front of the writer
   static const uint32_t CHUNK = 2048;        // bytes programmed per step while a visit is open
   static const uint32_t MAGIC = 0x314A424C;  // "LBJ1" little-endian
@@ -63,6 +67,12 @@ class VisitStore {
 
   /** Publish `len` bytes; true once the client took them. Runs on the shipper task. */
   using PublishFn = std::function<bool(const char *data, size_t len)>;
+  /**
+   * Frame bytes the visit still holds in RAM: a pointer to offset `off` and
+   * how many follow contiguously, or null once they are gone. Offsets start
+   * after the frame's 8-byte header, which close() writes.
+   */
+  using FrameSource = std::function<const uint8_t *(uint32_t off, uint32_t *avail)>;
 
   bool setup(const char *label, PublishFn publish) {
     part_ = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, label);
@@ -93,11 +103,11 @@ class VisitStore {
   }
 
   /**
-   * Start an entry for the visit being recorded into `frame`. Claims up to
+   * Start an entry for the visit whose samples `src` hands out. Claims up to
    * MAX_ENTRY sectors ahead, so the shipper stays out of them, and writes
    * the header. One sector op at most.
    */
-  bool open(const uint8_t *frame) {
+  bool open(FrameSource src) {
     if (part_ == nullptr || wr_.open) return false;
     if (head_ + MAX_ENTRY > nsec_) head_ = 0;
     xSemaphoreTake(lock_, portMAX_DELAY);
@@ -110,7 +120,7 @@ class VisitStore {
     reserved_count_ = MAX_ENTRY;
     xSemaphoreGive(lock_);
 
-    wr_ = Write{frame, head_, seq_next_++, 0, 0, true};
+    wr_ = Write{std::move(src), head_, seq_next_++, 0, 0, true};
     prepare_sector_(head_);
     wr_.prepared = 1;
     Header h{MAGIC, wr_.seq, 0xFFFFFFFFu, 0xFFFFFFFFu, WRITING, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}};
@@ -124,6 +134,13 @@ class VisitStore {
   }
 
   bool is_open() const { return wr_.open; }
+
+  /** The open visit's samples as written so far, through the mapping; null with no entry open. */
+  const int16_t *samples_on_flash() const {
+    return wr_.open ? reinterpret_cast<const int16_t *>(map_ + wr_.sector * SECTOR + HEADER + 8) : nullptr;
+  }
+  /** How many of those samples are on flash. */
+  int samples_written() const { return wr_.open && wr_.written > 8 ? static_cast<int>((wr_.written - 8) / 2) : 0; }
 
   /**
    * Program whole chunks of the frame that have arrived since the last
@@ -142,14 +159,29 @@ class VisitStore {
     erase_ahead_(head_);
   }
 
-  /** The visit ended: write what is left, then finish the header. Synchronous, usually one sector. */
-  bool close(uint32_t frame_len) {
+  /** Write the frame out from the source up to byte `frame_bytes`, e.g. the visit's last samples. */
+  bool drain(uint32_t frame_bytes) {
+    while (wr_.open && wr_.written < frame_bytes) write_(frame_bytes - wr_.written);
+    return wr_.open;
+  }
+
+  /** Add bytes after what is written so far (the trailer). */
+  bool append(const char *data, size_t n) {
     if (!wr_.open) return false;
-    while (wr_.open && wr_.written < frame_len) write_(frame_len - wr_.written);
+    program_(reinterpret_cast<const uint8_t *>(data), n);
+    return wr_.open;
+  }
+
+  /**
+   * The visit ended and everything is written: put the frame's own header
+   * (`frame_header`, "LBV1" and the count) in front, then finish ours.
+   * Synchronous, usually one sector op.
+   */
+  bool close(const uint8_t frame_header[8]) {
     if (!wr_.open) return false;
+    uint32_t frame_len = wr_.written;
     uint32_t base = wr_.sector * SECTOR;
-    // Frame header (magic + count) now that count is known, then ours.
-    esp_err_t err = esp_partition_write(part_, base + HEADER, wr_.frame, 8);
+    esp_err_t err = esp_partition_write(part_, base + HEADER, frame_header, 8);
     Header h{MAGIC, wr_.seq, frame_len, 0, COMPLETE, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}};
     h.crc = crc_(h);
     if (err == ESP_OK) err = esp_partition_write(part_, base + offsetof(Header, len), &h.len, 12);
@@ -168,6 +200,11 @@ class VisitStore {
     ESP_LOGI(TAG, "Journaled visit seq %u: %u bytes", (unsigned) e.seq, (unsigned) e.len);
     kick();
     return true;
+  }
+
+  /** Give up the open entry without recording it (the event was reset). */
+  void discard() {
+    if (wr_.open) abandon_("event reset");
   }
 
   /** Wake the shipper (on MQTT connect). */
@@ -197,7 +234,7 @@ class VisitStore {
   };
 
   struct Write {
-    const uint8_t *frame;
+    FrameSource src;
     uint32_t sector;    // first sector of the entry
     uint32_t seq;
     uint32_t written;   // frame bytes on flash so far
@@ -295,8 +332,28 @@ class VisitStore {
     if (esp_partition_erase_range(part_, s * SECTOR, SECTOR) == ESP_OK) set_blank_(s, true);
   }
 
-  /** Program the next `n` frame bytes; sectors are prepared as the entry grows into them. */
+  /** Copy the next `n` frame bytes from the source, in as many pieces as the ring hands out. */
   void write_(uint32_t n) {
+    while (wr_.open && n > 0) {
+      uint32_t avail = 0;
+      const uint8_t *p = wr_.src ? wr_.src(wr_.written, &avail) : nullptr;
+      if (p == nullptr || avail == 0) {
+        abandon_("samples left RAM before they were written");
+        return;
+      }
+      uint32_t k = std::min(n, avail);
+      program_(p, k);
+      n -= k;
+    }
+  }
+
+  /** Program `n` bytes at the end of the entry; sectors are prepared as it grows into them. */
+  void program_(const uint8_t *data, uint32_t n) {
+    if (n == 0) return;
+    if (HEADER + wr_.written + n > MAX_ENTRY * SECTOR) {
+      abandon_("visit larger than an entry");
+      return;
+    }
     uint32_t off = wr_.sector * SECTOR + HEADER + wr_.written;
     uint32_t last = (off + n - 1) / SECTOR;
     for (uint32_t s = wr_.sector + wr_.prepared; s <= last; s++) {
@@ -304,7 +361,7 @@ class VisitStore {
       wr_.prepared = s - wr_.sector + 1;
     }
     for (uint32_t s = wr_.sector; s <= last; s++) set_blank_(s, false);
-    if (esp_partition_write(part_, off, wr_.frame + wr_.written, n) != ESP_OK) {
+    if (esp_partition_write(part_, off, data, n) != ESP_OK) {
       abandon_("write failed");
       return;
     }

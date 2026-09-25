@@ -6,11 +6,13 @@
 //
 //   "LBV1"  u32 n  int16 x n (little-endian)  JSON trailer
 //
-// The samples are the WeightBuffer's storage verbatim — the buffer is the
-// frame, so nothing is copied to ship it. The trailer follows the last
-// sample: identity, timing, the zone table that decodes the codes, the
-// device verdict and the configuration it ran under. Published for short
-// events too (visit null), so the hub sees what the device skipped.
+// The samples are the WeightBuffer's codes verbatim. On the device they go
+// to the journal as the visit runs and the trailer is streamed in after
+// them at the end, so the frame only ever exists whole on flash. The
+// trailer follows the last sample: identity, timing, the zone table that
+// decodes the codes, the device verdict and the configuration it ran
+// under. Published for short events too (visit null), so the hub sees what
+// the device skipped.
 //
 // Replay: rebuild the buffer from the raw codes and zones, then feed
 // sample_to_grams(i) to process_sample(i) in order. The zone for sample i
@@ -31,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <functional>
 
 struct SampleDrop {
   int index;        // the sample that arrived late
@@ -64,6 +67,9 @@ struct BlobEnd {
   const char *version;
 };
 
+/** Takes the next `n` bytes of the frame; false stops the writer. */
+using BlobSink = std::function<bool(const char *data, size_t n)>;
+
 class VisitRecorder {
  public:
   static const int MAX_DROPS = 256;
@@ -91,43 +97,73 @@ class VisitRecorder {
     last_ms_ = now_ms;
   }
 
+  /** The frame's first 8 bytes: "LBV1" and the sample count, little-endian. */
+  static void header(uint8_t out[8], int count) {
+    memcpy(out, "LBV1", 4);
+    uint32_t n = static_cast<uint32_t>(count);
+    for (int i = 0; i < 4; i++) out[4 + i] = static_cast<uint8_t>(n >> (8 * i));
+  }
+
   /**
-   * Write the header and trailer around the samples already in the buffer.
-   * Returns the frame length in bytes; the frame starts at &buf.frame().
+   * The trailer, streamed to `out` in pieces. On the device the header and
+   * samples are already in the journal and this is all that is left.
+   * Returns the trailer length, or 0 if `out` refused a piece.
    */
-  size_t finish(WeightBuffer &buf, const BlobEnd &e, const BlobConfig &c) const {
-    VisitFrame &f = buf.frame();
-    memcpy(f.magic, "LBV1", 4);
-    f.count = static_cast<uint32_t>(buf.count());
-    char *base = reinterpret_cast<char *>(&f);
-    Cursor w{base + 8 + 2 * buf.count(), base + sizeof(VisitFrame)};
+  size_t write_trailer(const WeightBuffer &buf, const BlobEnd &e, const BlobConfig &c, const BlobSink &out) {
+    Cursor w{this, &out};
     trailer_(w, buf, e, c);
-    if (w.overflow) {
-      // Cannot happen with SA_FRAME_TAIL sized for full tables; keep the
-      // frame parseable rather than ship a torn trailer.
-      w = Cursor{base + 8 + 2 * buf.count(), base + sizeof(VisitFrame)};
-      w.printf("{\"id\":%lld,\"stored\":%d,\"truncated\":true}", static_cast<long long>(e.id), buf.count());
+    w.flush();
+    return w.failed ? 0 : w.total;
+  }
+
+  /** The whole frame, header to trailer, for tools that hold it in memory. */
+  size_t write_frame(const WeightBuffer &buf, const BlobEnd &e, const BlobConfig &c, const BlobSink &out) {
+    uint8_t h[8];
+    header(h, buf.count());
+    if (!out(reinterpret_cast<const char *>(h), 8)) return 0;
+    for (int i = 0; i < buf.count(); i++) {
+      int16_t v = buf.raw_sample(i);
+      uint8_t le[2] = {static_cast<uint8_t>(v & 0xFF), static_cast<uint8_t>((v >> 8) & 0xFF)};
+      if (!out(reinterpret_cast<const char *>(le), 2)) return 0;
     }
-    return static_cast<size_t>(w.p - base);
+    size_t t = write_trailer(buf, e, c, out);
+    return t ? 8 + 2 * static_cast<size_t>(buf.count()) + t : 0;
   }
 
  private:
-  /** Bounded writer over the tail of the frame. */
+  static const size_t STAGE = 1024;
+
+  /**
+   * Formats into the staging buffer and hands it to the sink whenever the
+   * next piece would not fit. Every printf below is well under STAGE, so a
+   * piece that does not fit an empty buffer is a bug, reported as failure.
+   */
   struct Cursor {
-    char *p;
-    const char *end;
-    bool overflow = false;
+    VisitRecorder *r;
+    const BlobSink *out;
+    size_t used = 0;
+    size_t total = 0;
+    bool failed = false;
+    void flush() {
+      if (failed || used == 0) return;
+      if (!(*out)(r->stage_, used)) failed = true;
+      total += used;
+      used = 0;
+    }
     void printf(const char *fmt, ...) __attribute__((format(printf, 2, 3))) {
-      if (overflow) return;
-      va_list ap;
-      va_start(ap, fmt);
-      int n = vsnprintf(p, end - p, fmt, ap);
-      va_end(ap);
-      if (n < 0 || n >= end - p) {
-        overflow = true;
-        return;
+      for (int attempt = 0; attempt < 2 && !failed; attempt++) {
+        va_list ap;
+        va_start(ap, fmt);
+        int n = vsnprintf(r->stage_ + used, STAGE - used, fmt, ap);
+        va_end(ap);
+        if (n >= 0 && static_cast<size_t>(n) < STAGE - used) {
+          used += n;
+          return;
+        }
+        if (n < 0 || used == 0) break;
+        flush();
       }
-      p += n;
+      failed = true;
     }
   };
 
@@ -188,6 +224,7 @@ class VisitRecorder {
   }
 
   time_t id_ = 0;
+  char stage_[STAGE];
   SampleDrop drops_[MAX_DROPS];
   int drop_count_ = 0;
   bool drops_overflow_ = false;
