@@ -125,7 +125,10 @@ YAML to match your wiring.
 
 5. Flash with ESPHome over USB the first time: the journal partition
    changes the partition table, which OTA never touches. Saved calibration
-   does not survive that table change, so re-tare afterwards.
+   does not survive that table change, so re-tare afterwards. Don't skip
+   this: the device only keeps the last seven minutes of a visit in RAM
+   and reads the rest back from the journal, so without the partition a
+   longer visit is still counted but gets no verdict.
 
 ## Calibration
 
