@@ -449,6 +449,12 @@ class StateAnalyzer {
     if (elim_count_ > best_elim_dur_ && elim_count_ > 0)
       best_w = elim_sum_ / static_cast<float>(elim_count_);
     result_.cat_weight = (best_w > 0.0f) ? best_w : cat_weight_;
+    // The event usually closes a few seconds after the cat leaves, well
+    // before REENTRY_WIN, so the GAP branch never gets to set the waste.
+    // What the scale settled on over the last second of that gap is the
+    // same thing end_event tares away, so take it from there.
+    if (state_ == AnalyzerState::GAP && current_sample_ - state_start_ >= WINDOW)
+      waste_weight_ = window_.mean();
     result_.waste_weight = waste_weight_;
     result_.period_count = 0;
     result_.elimination_type = EliminationType::UNKNOWN;
@@ -471,6 +477,7 @@ class StateAnalyzer {
 
   void reset() {
     state_ = AnalyzerState::EMPTY;
+    state_start_ = 0;
     session_active_ = false;
     window_.reset(WINDOW);
     weight_hist_.reset(WINDOW);
@@ -520,6 +527,7 @@ class StateAnalyzer {
   bool session_active_ = false;
   int session_start_ = 0;
   int current_sample_ = 0;
+  int state_start_ = 0;  // sample on which state_ was entered (not backdated)
   float waste_weight_ = 0.0f;
   float cat_weight_ = 0.0f;
   float elim_sum_ = 0.0f;
@@ -579,6 +587,7 @@ class StateAnalyzer {
       }
     }
     state_ = ns;
+    state_start_ = current_sample_;
   }
 
   /** among cats within tolerance, smallest absolute diff wins. */
