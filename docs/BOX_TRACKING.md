@@ -120,7 +120,8 @@ read "empty" before refilling keeps them apart.
 **Deep clean not detected.** In order of likelihood:
 
 - Empty Box Weight isn't set. The tracker still sees the box leave and
-  return but has no way to tell an empty box from a scooped-down one.
+  return but has no way to tell an empty box from a scooped-down one. Put
+  the empty box on and press `Set Empty Box Weight`.
 - The box came back with something in it: the scoop, a bag, a liner. More
   than 150 g over the empty weight reads as "not empty".
 - Litter went in less than 3 s after the box was set down. The empty level
@@ -128,7 +129,7 @@ read "empty" before refilling keeps them apart.
   it.
 - Empty Box Weight is stale. A washed box weighing a few grams more wet is
   within the 150 g tolerance; a different box or a heavy new liner may not
-  be.
+  be. Put the empty box on and press `Set Empty Box Weight`.
 
 **Deep clean detected, timer didn't restart.** The clock wasn't synced at
 the time (the log says "Deep clean not stamped"). Counters still reset,

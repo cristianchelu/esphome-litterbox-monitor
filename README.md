@@ -140,16 +140,16 @@ YAML to match your wiring.
    If this is not the case, consult the ESPHome logs for errors and repeat
    steps 2-5.
 
-6. ***Optional*** Fill in "Empty Box Weight" number entity to the weight of the
-    empty litterbox (in grams). This will improve the accuracy of the
+6. ***Optional*** Set the "Empty Box Weight": place the empty litterbox on the
+    monitor and press `Set Empty Box Weight` (or type its weight in grams into
+    the number entity). This will improve the accuracy of the
     "Litter Remaining" sensor, and it is how a deep clean is recognised: the
-    box coming back within 150 g of this weight. You can place the box on the
-    monitor and read the "Raw weight" sensor to get this value.
+    box coming back within 150 g of this weight.
 
 7. Set the litterbox on top, add the litter and trigger the `Reset clean` button.
 
-   ***Optional*** Copy the "Litter Remaining" reading into the "Full Litter
-   Weight" number entity to get "Litter Level" percentage estimates.
+   ***Optional*** Press `Set Full Litter Weight` to take the current
+   "Litter Remaining" as 100% and get "Litter Level" percentage estimates.
 
 8. Take the approximate weight of your cats (within 10%).
 
@@ -225,6 +225,10 @@ That's it — the monitor is ready to use.
 ### Buttons
 
 - **Reset Deep Clean Timer:** Resets the deep clean countdown.
+- **Set Empty Box Weight:** Takes the current reading as the empty box's
+  weight. Put the empty box on the monitor first.
+- **Set Full Litter Weight:** Takes the current "Litter Remaining" as 100% for
+  "Litter Level".
 - **Reset Clean:** Resets tare, litter, waste, and visit counters.
 
   Only required if the automatic clean detection failed.
