@@ -1146,7 +1146,9 @@ script:
           // event (the cat leaving) add the waste. Once only: something that
           // holds this still through two timeouts is not a cat.
           bool cat_inside = false;
-          if (box.kind == BoxEventKind::NONE && long_enough) {
+          // With the box off the board there is nothing to judge a visit
+          // or waste by: taking it away is maintenance, not a cat.
+          if (box.kind == BoxEventKind::NONE && long_enough && !box.absent) {
             float min_cat_kg = 0.0f;
             for (int i = 0; i < 5; i++) {
               float w = id(cat_weights)[i];
