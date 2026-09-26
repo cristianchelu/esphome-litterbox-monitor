@@ -260,7 +260,8 @@ time:
     timezone: ${timezone}
     id: homeassistant_time
     on_time_sync:
-      # The countdown is NAN until the clock is valid; don't wait a minute more.
+      # The countdown reads NAN until the clock is valid: refresh it now
+      # rather than at its next update.
       - component.update: litter_life_left
       # Catch up on a midnight missed while powered off or without a clock.
       - script.execute: roll_daily_counters
@@ -627,6 +628,11 @@ sensor:
     name: "Litter Remaining"
     icon: "mdi:tray-full"
     accuracy_decimals: 2
+    # A few grams under zero is two readings of an empty box disagreeing,
+    # not negative litter.
+    filters:
+      - clamp:
+          min_value: 0
   # Litter remaining as a share of a full box.
   - platform: template
     id: litter_level
@@ -1005,6 +1011,14 @@ script:
           get_sample_idx() = 0;
           get_box_monitor().begin_event((id(tare_value) + id(auto_tare_value)) * 1000.0f);
           ESP_LOGD("SA", "Event start, analyzer reset");
+      # The inactivity timeout is otherwise only armed when vibration stops,
+      # so an event opened over a box that is already still (re-opened for
+      # "still on the scale, waiting for it to leave") would never close.
+      - if:
+          condition:
+            binary_sensor.is_off: vibration_detected
+          then:
+            - script.execute: event_timeout
 
   # Close the event: score the visit, work out what happened to the box,
   # then tare. Runs when activity drops, on the inactivity timeout, and when
@@ -1058,16 +1072,21 @@ script:
           // inert, and that is the stronger evidence.
           if (visit != nullptr && box.kind == BoxEventKind::NONE) {
             const StateResult &result = *visit;
-            id(elimination_type_sensor).publish_state(
-                elimination_type_str(result.elimination_type));
-            id(event_duration_sensor).publish_state(duration);
+            // A continued event is the second half of a visit the timeout
+            // split: the cat leaving. It only adds waste; the result stays the
+            // first half's, which the daily counts were taken from.
+            if (!continued) {
+              id(elimination_type_sensor).publish_state(
+                  elimination_type_str(result.elimination_type));
+              id(event_duration_sensor).publish_state(duration);
 
-            // Publish std dev of the single elimination period
-            for (int i = 0; i < result.period_count; i++) {
-              if (result.periods[i].state == AnalyzerState::ELIMINATING &&
-                  result.periods[i].std_dev >= 0.0f) {
-                id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
-                break;
+              // Publish std dev of the single elimination period
+              for (int i = 0; i < result.period_count; i++) {
+                if (result.periods[i].state == AnalyzerState::ELIMINATING &&
+                    result.periods[i].std_dev >= 0.0f) {
+                  id(elimination_std_dev_sensor).publish_state(result.periods[i].std_dev);
+                  break;
+                }
               }
             }
 
@@ -1138,7 +1157,9 @@ script:
           // event (the cat leaving) add the waste. Once only: something that
           // holds this still through two timeouts is not a cat.
           bool cat_inside = false;
-          if (box.kind == BoxEventKind::NONE && long_enough) {
+          // With the box off the board there is nothing to judge a visit
+          // or waste by: taking it away is maintenance, not a cat.
+          if (box.kind == BoxEventKind::NONE && long_enough && !box.absent) {
             float min_cat_kg = 0.0f;
             for (int i = 0; i < 5; i++) {
               float w = id(cat_weights)[i];
@@ -1150,11 +1171,17 @@ script:
               ESP_LOGI("SA", "%.2f kg still on the scale, waiting for it to leave", end_tared_kg);
             } else if (heavy) {
               ESP_LOGW("SA", "%.2f kg sat through two timeouts; taring without counting waste", end_tared_kg);
-            } else {
-              if (end_tared_kg > 0.0f) {
-                id(waste_weight).publish_state(id(waste_weight).state + end_tared_kg * 1000.0f);
-              }
-              if (!continued) id(visits).publish_state(id(visits).state + 1);
+            } else if (end_tared_kg > 0.0f && (cat_event || continued)) {
+              // Waste is what a cat left. Without one the difference is a box
+              // nudged or sitting a little differently, not waste. A continued
+              // event is the cat leaving.
+              id(waste_weight).publish_state(id(waste_weight).state + end_tared_kg * 1000.0f);
+            }
+            // A visit is a recognised cat, counted once: in the event that
+            // recognised it, also when the timeout closed that with the cat
+            // still inside (the event after is it leaving).
+            if (cat_event && !continued) {
+              id(visits).publish_state(id(visits).state + 1);
             }
           }
 
