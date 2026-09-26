@@ -627,6 +627,11 @@ sensor:
     name: "Litter Remaining"
     icon: "mdi:tray-full"
     accuracy_decimals: 2
+    # A few grams under zero is two readings of an empty box disagreeing,
+    # not negative litter.
+    filters:
+      - clamp:
+          min_value: 0
   # Litter remaining as a share of a full box.
   - platform: template
     id: litter_level
