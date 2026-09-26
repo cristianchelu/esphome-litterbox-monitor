@@ -1005,6 +1005,14 @@ script:
           get_sample_idx() = 0;
           get_box_monitor().begin_event((id(tare_value) + id(auto_tare_value)) * 1000.0f);
           ESP_LOGD("SA", "Event start, analyzer reset");
+      # The inactivity timeout is otherwise only armed when vibration stops,
+      # so an event opened over a box that is already still (re-opened for
+      # "still on the scale, waiting for it to leave") would never close.
+      - if:
+          condition:
+            binary_sensor.is_off: vibration_detected
+          then:
+            - script.execute: event_timeout
 
   # Close the event: score the visit, work out what happened to the box,
   # then tare. Runs when activity drops, on the inactivity timeout, and when
