@@ -652,6 +652,11 @@ class StateAnalyzer {
 //   then +N kg steps     bags of litter poured in, evened out, left alone
 // Per event it also keeps the list of plateaus (stable ≥ 2 s) so the end-of-
 // event classifier can ask "rose monotonically, then went inert?".
+//
+// A removable lid (lid_g > 0) comes off and goes back as one step of about its
+// weight between plateaus; scooping comes out in small drops and litter pours
+// in as a ramp. Levels measured with the lid off are counted as if it were on,
+// and its state carries over between events, like absence.
 // ---------------------------------------------------------------------------
 
 static const int BM_MAX_PLATEAUS = 32;
@@ -665,6 +670,7 @@ struct Plateau {
   int end;  // exclusive
   float mean_g;
   float sigma_g;
+  bool lid_off;  // the lid was off the box for this plateau
 };
 
 struct BoxConfig {
@@ -677,6 +683,8 @@ struct BoxConfig {
   float scoop_min_g;   // drop (positive number) that counts as a scoop
   int scoop_min_s;     // ...unless the event is at least this long
   int settle_s;        // inert seconds before a top-up ends the event
+  float lid_g = 0.0f;  // weight of a removable lid; 0 = no lid, nothing tracked
+  float lid_tol_g = 30.0f;  // a step within this of lid_g is the lid
 };
 
 struct BoxEvent {
@@ -688,11 +696,17 @@ struct BoxEvent {
   bool zero_valid;
   bool absent;           // box not on the board at the end — do not tare
   bool scooped;          // top-up: litter came out before the bag went in
+  bool lid_off;          // the lid is off at the end (level_g counts it anyway)
+  float lid_delta_g;     // what the lid did to the weight: +lid_g put back, -lid_g taken off
 };
 
 class BoxMonitor {
  public:
-  void configure(const BoxConfig &c) { cfg_ = c; }
+  void configure(const BoxConfig &c) {
+    cfg_ = c;
+    // No lid (any more): nothing can be off, and nothing carries over.
+    if (cfg_.lid_g <= 0.0f) lid_off_ = pl_lid_off_ = ev_lid_off_ = lid_opened_ = false;
+  }
 
   /** `base_g`: absolute level the event is measured against (the last tare). */
   void begin_event(float base_g) {
@@ -709,6 +723,8 @@ class BoxMonitor {
     zero_error_g_ = 0.0f;
     box_measured_g_ = 0.0f;
     inert_len_ = 0;
+    ev_lid_off_ = lid_off_;
+    lid_opened_ = lid_off_;
   }
 
   /** Every sample, in absolute grams, event or not. */
@@ -726,6 +742,7 @@ class BoxMonitor {
       double d = g - pl_mean_;
       pl_mean_ += d / pl_n_;
       pl_m2_ += d * (g - pl_mean_);
+      if (pl_n_ == LID_HOLD) track_lid(static_cast<float>(pl_mean_));
     } else if (pl_n_ > 0) {
       close_plateau();
     }
@@ -748,11 +765,15 @@ class BoxMonitor {
         zero_valid_ = true;
       }
     } else if (stable && cfg_.box_g > 0.0f && (absent_ || state_ == BoxState::EMPTY) &&
-               std::abs(m - cfg_.box_g) < cfg_.empty_tol_g) {
+               (std::abs(m - cfg_.box_g) < cfg_.empty_tol_g || empty_without_lid(m))) {
       if (state_ != BoxState::EMPTY && ++hold_ >= HOLD) {
         state_ = BoxState::EMPTY;
         deep_clean_ = true;
-        box_measured_g_ = static_cast<float>(pl_mean_);
+        // An empty box can come back with its lid on or off.
+        bool no_lid = std::abs(m - cfg_.box_g) >= cfg_.empty_tol_g;
+        lid_off_ = pl_lid_off_ = no_lid;
+        if (no_lid) lid_opened_ = true;
+        box_measured_g_ = with_lid(static_cast<float>(pl_mean_), no_lid);
         empty_pl_ = pl_count_;  // the open plateau closes into this slot
         absent_ = false;
       }
@@ -770,6 +791,7 @@ class BoxMonitor {
 
   BoxState state() const { return state_; }
   bool absent() const { return absent_; }
+  bool lid_off() const { return lid_off_; }
 
   /**
    * True once the stability window is full and `state()` means something. Until
@@ -786,7 +808,7 @@ class BoxMonitor {
    */
   bool settled() const {
     if (inert_len_ < cfg_.settle_s * HZ || absent_) return false;
-    return deep_clean_ || current_level() - base_g_ >= cfg_.top_up_min_g;
+    return deep_clean_ || with_lid(current_level(), lid_off_) - ev_base() >= cfg_.top_up_min_g;
   }
 
   /**
@@ -801,14 +823,17 @@ class BoxMonitor {
     if (ended_stable) close_plateau();
     BoxEvent &r = result_;
     r.kind = BoxEventKind::NONE;
-    r.level_g = pl_count_ > 0 ? pl_[pl_count_ - 1].mean_g : win_.mean();
+    r.level_g = pl_count_ > 0 ? level(pl_count_ - 1) : with_lid(win_.mean(), lid_off_);
     r.litter_added_g = 0.0f;
     r.box_measured_g = box_measured_g_;
     r.zero_error_g = zero_error_g_;
     r.zero_valid = zero_valid_;
     r.absent = absent_;
     r.scooped = false;
-    float delta = r.level_g - base_g_;
+    r.lid_off = lid_off_;
+    r.lid_delta_g = with_lid(0.0f, ev_lid_off_) - with_lid(0.0f, lid_off_);
+    float base = ev_base();
+    float delta = r.level_g - base;
 
     if (absent_) {
       // Still off or in the air: nothing to conclude until it comes back.
@@ -839,17 +864,18 @@ class BoxMonitor {
     // lowest point of the event rather than its start, so scooping before
     // the pour is not subtracted from the bag (it is reported alongside).
     int ls = ladder_start();
-    float from = ls < pl_count_ ? std::min(base_g_, pl_[ls].mean_g) : base_g_;
+    float from = ls < pl_count_ ? std::min(base, level(ls)) : base;
     if (ended_inert && r.level_g - from >= cfg_.top_up_min_g && monotonic_from(ls)) {
       r.kind = BoxEventKind::TOP_UP;
       r.litter_added_g = r.level_g - from;
-      r.scooped = base_g_ - from >= cfg_.scoop_min_g;
+      r.scooped = base - from >= cfg_.scoop_min_g;
       return r;
     }
     // A lift-and-return needs no minimum duration: the absence already says
     // the box was opened, so a drop is a scoop however quick the hands were.
+    // So does taking the lid off.
     if (!cat_event && delta <= -cfg_.scoop_min_g &&
-        (duration_s >= cfg_.scoop_min_s || began_absent_ || saw_off_)) {
+        (duration_s >= cfg_.scoop_min_s || began_absent_ || saw_off_ || lid_opened_)) {
       r.kind = BoxEventKind::SCOOP;
       return r;
     }
@@ -876,6 +902,13 @@ class BoxMonitor {
    * lands, a hand off the rim). A drop bigger than this is mass leaving.
    */
   static constexpr float LEVEL_TOL = 50.0f;
+  /**
+   * Coming off, the first plateau may already have a scoopful out, so up to
+   * this much more than lid_g + lid_tol_g is accepted as the lid.
+   */
+  static constexpr float LID_SCOOP_G = 150.0f;
+  /** A lid lifted off for a moment holds still for only a second or two. */
+  static constexpr int LID_HOLD = HZ;
 
   BoxConfig cfg_{};
   Ring win_{WINDOW};
@@ -903,11 +936,46 @@ class BoxMonitor {
   float box_measured_g_ = 0.0f;
   float zero_error_g_ = 0.0f;
   bool zero_valid_ = false;
+  // lid (cfg_.lid_g > 0): lid_off_ and last_level_g_ carry over between events
+  bool lid_off_ = false;
+  bool pl_lid_off_ = false;   // lid state of the open plateau
+  float last_level_g_ = NAN;  // last level held LID_HOLD with the box on the board
+  float lid_ref_g_ = NAN;     // the level just before the lid came off
+  bool ev_lid_off_ = false;   // lid state when the event began
+  bool lid_opened_ = false;   // the lid was off at some point this event
   BoxEvent result_{};
 
   /** Below anything the box can weigh: it is off the board (or the board is in the air). */
   bool below_box(float g) const {
     return cfg_.box_g > 0.0f ? g < 0.5f * cfg_.box_g : g < cfg_.off_tol_g;
+  }
+
+  /** A level as if the lid were on. */
+  float with_lid(float g, bool lid_off) const { return lid_off ? g + cfg_.lid_g : g; }
+  float level(int i) const { return with_lid(pl_[i].mean_g, pl_[i].lid_off); }
+  /** What the event is measured against, lid on. */
+  float ev_base() const { return with_lid(base_g_, ev_lid_off_); }
+
+  bool empty_without_lid(float g) const {
+    return cfg_.lid_g > 0.0f && std::abs(g + cfg_.lid_g - cfg_.box_g) < cfg_.empty_tol_g;
+  }
+
+  /** Once per plateau, when it has held LID_HOLD: did the lid just come off or go back? */
+  void track_lid(float g) {
+    pl_lid_off_ = lid_off_;
+    if (cfg_.lid_g <= 0.0f || below_box(g) || std::isnan(last_level_g_)) return;
+    float d = g - last_level_g_;
+    float tol = cfg_.lid_tol_g;
+    if (!lid_off_ && d <= -(cfg_.lid_g - tol) && d >= -(cfg_.lid_g + tol + LID_SCOOP_G)) {
+      lid_off_ = true;
+      lid_ref_g_ = last_level_g_;
+    } else if (lid_off_ && (std::abs(d - cfg_.lid_g) <= tol ||
+                            // back to the level it left with the lid on: a missed step
+                            std::abs(g - lid_ref_g_) <= tol)) {
+      lid_off_ = false;
+    }
+    pl_lid_off_ = lid_off_;
+    if (lid_off_) lid_opened_ = true;
   }
 
   /** Lowest plateau since the box was last away: where a pour starts from. */
@@ -917,7 +985,7 @@ class BoxMonitor {
       if (below_box(pl_[i].mean_g)) s = i + 1;
     int lo = s;
     for (int i = s + 1; i < pl_count_; i++)
-      if (pl_[i].mean_g < pl_[lo].mean_g) lo = i;
+      if (level(i) < level(lo)) lo = i;
     return lo;
   }
 
@@ -925,10 +993,13 @@ class BoxMonitor {
     if (pl_n_ >= MIN_PLATEAU && pl_start_ >= ev_start_) {
       float sigma = pl_n_ > 1 ? sqrtf(static_cast<float>(pl_m2_ / (pl_n_ - 1))) : 0.0f;
       if (pl_count_ < BM_MAX_PLATEAUS)
-        pl_[pl_count_++] = {pl_start_, pl_start_ + pl_n_, static_cast<float>(pl_mean_), sigma};
+        pl_[pl_count_++] = {pl_start_, pl_start_ + pl_n_, static_cast<float>(pl_mean_), sigma,
+                            pl_lid_off_};
       else
         pl_overflow_ = true;
     }
+    if (pl_n_ >= LID_HOLD && !below_box(static_cast<float>(pl_mean_)))
+      last_level_g_ = static_cast<float>(pl_mean_);
     pl_n_ = 0;
     pl_mean_ = 0.0;
     pl_m2_ = 0.0;
@@ -942,7 +1013,7 @@ class BoxMonitor {
   bool monotonic_from(int from) const {
     if (pl_overflow_) return false;
     for (int i = from + 1; i < pl_count_; i++)
-      if (pl_[i].mean_g < pl_[i - 1].mean_g - LEVEL_TOL) return false;
+      if (level(i) < level(i - 1) - LEVEL_TOL) return false;
     return true;
   }
 };
