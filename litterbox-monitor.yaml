@@ -1298,9 +1298,11 @@ script:
           // task waits for the network. Without an entry there is no record:
           // the early samples of anything longer than the ring are gone.
           BlobEnd blob_end;
-          blob_end.id = id(event_start);
-          blob_end.ended = now;
+          // event_start is millis() for timing the event; the id is when it
+          // began on the wall clock, which is what the hub dates it by.
           blob_end.clock_valid = id(homeassistant_time).now().is_valid();
+          blob_end.id = blob_end.clock_valid ? now - duration : 0;
+          blob_end.ended = now;
           blob_end.duration_s = duration;
           blob_end.samples = samples;
           blob_end.long_enough = long_enough;
