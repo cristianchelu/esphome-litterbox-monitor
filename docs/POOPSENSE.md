@@ -76,7 +76,7 @@ When activity ends, the raw state timeline goes through cleanup:
 1. **Merge**: Short `OCCUPIED` blips (< 1.5 s) sandwiched between two
    `ELIMINATING` periods get absorbed into one continuous elimination --
    these are just transient body shifts, not real state changes.
-2. **Downgrade**: `ELIMINATING` periods shorter than 5 seconds are demoted to
+2. **Downgrade**: `ELIMINATING` periods shorter than 8 seconds are demoted to
    `OCCUPIED` -- too brief to be a real elimination event.
 3. **Collapse**: Consecutive periods of the same state get merged.
 
@@ -158,7 +158,7 @@ defecation.
 - **Cats of similar weight** (within ~10%) can't be reliably distinguished.
   This is a fundamental limitation of weight-only identification.
 
-- **Very short eliminations** (< 5 s) are filtered out to avoid false
+- **Very short eliminations** (< 8 s) are filtered out to avoid false
   positives.  A cat with unusually fast events may occasionally get
   `no_elimination`.
 

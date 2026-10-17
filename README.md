@@ -51,8 +51,10 @@ buttons, and actions.
 
 ### ESP32
 
-- Use a variant with a **hardware FPU**: the classic ESP32 (what the
-  config targets and the development build runs) or the ESP32-S3.
+- Use a variant with a **hardware FPU**: the classic ESP32 (what the config
+  targets) or the ESP32-S3. For an S3 set `board: esp32-s3-devkitc-1` and
+  pick HX711 pins that exist on it (the development build runs on an
+  ESP32-S3 Super Mini with `GPIO13`/`GPIO12`).
 - PoopSense leans on float math — per-sample filtering at 10 Hz and
   standard-deviation crunching at 0.1 g precision after every visit — so
   variants that emulate floats in software (S2, C3, C6) are untested.
@@ -91,13 +93,22 @@ YAML to match your wiring.
 
 ## Firmware Setup
 
-1. Clone this repo (or copy both [`litterbox-monitor.yaml`](litterbox-monitor.yaml)
-   and [`state_analyzer.h`](state_analyzer.h) into the same directory — both
-   files are required).
+1. Clone this repo (or copy [`litterbox-monitor.yaml`](litterbox-monitor.yaml),
+   [`state_analyzer.h`](state_analyzer.h), [`visit_blob.h`](visit_blob.h) and
+   [`visit_store.h`](visit_store.h) into the same directory — all four are
+   required).
 
 2. Create a `secrets.yaml` next to them defining:
    `wifi_ssid`, `wifi_password`, `litterbox_api_key`, `litterbox_ota_password`,
-   and `litterbox_ap_password`.
+   `litterbox_ap_password`, and `mqtt_broker` (host or IP of an MQTT broker).
+   Home Assistant talks to the device over the native API as before; the
+   broker only receives the visit record — every sample the analyzer saw,
+   plus its verdict — so a visit can be replayed off the device. Each visit
+   is one retained message, journaled to a 512 KB flash partition first and
+   shipped from there, so a broker that was down for a week gets every
+   visit when it comes back. The `mqtt:` block carries placeholder
+   credentials (`litterbox`/`litterbox`); change them to whatever your
+   broker expects.
 
 3. Edit the `substitutions` block at the top of the YAML:
 
@@ -112,7 +123,12 @@ YAML to match your wiring.
 4. If you wired the HX711 to different GPIO pins, update the `hx711` sensor
    section accordingly (see [Assembly](#assembly)).
 
-5. Flash with ESPHome as usual.
+5. Flash with ESPHome over USB the first time: the journal partition
+   changes the partition table, which OTA never touches. Saved calibration
+   does not survive that table change, so re-tare afterwards. Don't skip
+   this: the device only keeps the last seven minutes of a visit in RAM
+   and reads the rest back from the journal, so without the partition a
+   longer visit is still counted but gets no verdict.
 
 ## Calibration
 

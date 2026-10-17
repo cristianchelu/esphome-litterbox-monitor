@@ -75,6 +75,10 @@ substitutions:
   # top-up early and is what a rise must do to count as one.
   top_up_settle_time: "30" # seconds
 
+  # Root of the MQTT topics this device publishes under. Only the visit
+  # record goes over MQTT; everything else stays on the native API.
+  mqtt_topic: "cathealth/litterbox"
+
 globals:
   ## General state
 
@@ -179,6 +183,8 @@ esphome:
   comment: Smart Litterbox
   includes:
     - state_analyzer.h
+    - visit_blob.h
+    - visit_store.h
   project:
     name: "CristianChelu.LitterboxMonitor"
     version: "esp32.hx711"
@@ -190,11 +196,34 @@ esphome:
       # unpublished until the first visit ended. With no event open it is
       # empty by definition, so say so rather than leaving it unknown.
       - lambda: 'id(state_machine_state).publish_state("empty");'
+      # Visit journal on flash; the shipper task it starts is the only thing
+      # that ever publishes a visit record.
+      - lambda: !lambda |-
+          get_visit_store().setup("visits", [](const char *data, size_t len) {
+            return id(mqtt_client).publish("${mqtt_topic}/visit/last", data, len, 0, true);
+          });
 
+# Classic ESP32 with 4 MB flash. Only the last few minutes of a visit are
+# kept in RAM; the rest is read back from the journal, so no PSRAM is needed.
+# An ESP32-S3 works too: set `board: esp32-s3-devkitc-1` and move the HX711
+# pins below to ones the S3 has (the Super Mini build uses GPIO13/GPIO12).
 esp32:
   board: esp32dev
+  flash_size: 4MB
   framework:
     type: esp-idf
+  # Visit journal (see visit_store.h): ~100 typical visits or 7 hour-long
+  # ones, held until the broker takes them. Visits longer than ~7 minutes
+  # are analysed from it too, so without it (firmware OTA'd onto an old
+  # partition table) they get no verdict and no record. It comes out of the
+  # two OTA slots, 1.75 MB -> 1.5 MB each, still a third over the current
+  # binary. A changed partition table needs a serial flash (OTA never
+  # touches it) and moves NVS, so saved tare and cat weights start over once.
+  partitions:
+    - name: visits
+      type: data
+      subtype: undefined
+      size: 524288
 
 logger:
   level: INFO
@@ -241,6 +270,32 @@ api:
                   level: ERROR
                   tag: calibration
                   format: "Ignored: run calibration_tare first, and pass a known weight above 0 kg"
+
+# Carries only the visit record (see visit_blob.h). A null topic prefix
+# keeps every entity off MQTT — including the 10 Hz raw sensor — and turns
+# off the default birth/will, so presence is set explicitly. The broker is
+# a side channel: losing it must not reboot the device out from under the
+# native API, hence no reboot timeout.
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_broker
+  username: litterbox
+  password: litterbox
+  topic_prefix: null
+  discovery: false
+  discover_ip: false
+  log_topic: null
+  reboot_timeout: 0s
+  on_connect:
+    - lambda: 'get_visit_store().kick();'
+  birth_message:
+    topic: ${mqtt_topic}/status
+    payload: online
+    retain: true
+  will_message:
+    topic: ${mqtt_topic}/status
+    payload: offline
+    retain: true
 
 ota:
   - platform: esphome
@@ -520,13 +575,18 @@ sensor:
           if (!id(event_open)) return;
           float tared_g = (x - id(tare_value) - id(auto_tare_value)) * 1000.0f;
           static AnalyzerState prev_state = AnalyzerState::EMPTY;
-          get_analyzer().process_sample(tared_g, get_sample_idx());
+          // The buffer is the record of the visit, so the state machine
+          // runs on what the buffer holds (1 g, or 0.1 g while occupied),
+          // not on the raw float. Replaying the buffer then reproduces it.
+          VisitRecorder &rec = get_visit_recorder();
+          rec.sample(get_sample_idx(), millis());
+          float seen_g = get_weight_buf().push(tared_g);
+          get_analyzer().process_sample(seen_g, get_sample_idx());
           AnalyzerState cur = get_analyzer().current_state();
           if (cur != prev_state) {
             id(state_machine_state).publish_state(analyzer_state_str(cur));
             prev_state = cur;
           }
-          get_weight_buf().push(tared_g);
           get_sample_idx()++;
 
           // Fresh litter sitting dead still doesn't need to wait out the
@@ -953,6 +1013,19 @@ button:
                 id: calibrate_weight
                 known_weight_kg: !lambda return id(calibration_known_weight).state / 1000.0;
 
+# The journal keeps pace with the visit: whole 2 KB chunks of samples go
+# to flash as they fill (every ~100 s), so end_event has almost nothing
+# left to write, and the buffer learns how far back it can now read from
+# flash instead of RAM. Between visits the sectors ahead are kept blank.
+interval:
+  - interval: 20ms
+    then:
+      - lambda: !lambda |-
+          VisitStore &store = get_visit_store();
+          WeightBuffer &buf = get_weight_buf();
+          store.step(8 + 2 * buf.count());
+          buf.set_backing(store.samples_on_flash(), store.samples_written());
+
 script:
   # Zero the daily counters once the date has moved on. Runs at midnight and
   # on every clock sync, so a midnight spent powered off still gets its reset.
@@ -1003,6 +1076,14 @@ script:
           get_weight_buf().reset();
           get_analyzer().attach_buffer(&get_weight_buf());
           get_sample_idx() = 0;
+          get_visit_recorder().begin(id(event_start));
+          // Open the journal entry this visit will be written into as it
+          // happens, straight out of the buffer's ring.
+          if (!get_visit_store().open([](uint32_t off, uint32_t *avail) {
+                return get_weight_buf().frame_bytes(off, avail);
+              })) {
+            ESP_LOGW("BLOB", "No journal entry: a visit longer than %d s will not be analysed", SA_RING / 10);
+          }
           get_box_monitor().begin_event((id(tare_value) + id(auto_tare_value)) * 1000.0f);
           ESP_LOGD("SA", "Event start, analyzer reset");
 
@@ -1026,8 +1107,30 @@ script:
           // A cat was already scored in the event this one continues.
           bool continued = id(suppress_visit);
 
+          // What the analysis is about to run under. Taken now because
+          // finalize updates the cat weights, and the record must carry the
+          // values the verdict was made with.
+          static BlobConfig blob_cfg;
+          for (int i = 0; i < 5; i++) blob_cfg.cat_weights_kg[i] = id(cat_weights)[i];
+          blob_cfg.sd_threshold_g = id(elimination_std_dev_threshold).state;
+          blob_cfg.tare_kg = id(tare_value);
+          blob_cfg.auto_tare_kg = id(auto_tare_value);
+          blob_cfg.spike_threshold_kg = ${spike_threshold};
+          blob_cfg.vibration_threshold_kg = ${vibration_threshold};
+          blob_cfg.activity_off_s = ${activity_off_delay};
+          blob_cfg.event_timeout_s = ${event_timeout};
+          blob_cfg.box = get_box_monitor().config();
+
+          // Refuse rather than guess: a visit whose early samples are gone
+          // (no journal, and longer than the RAM ring) gets no verdict.
+          // Waste, taring and the visit count below still run.
+          bool complete = get_weight_buf().complete();
+          if (long_enough && !complete) {
+            ESP_LOGE("SA", "Visit not analysed: %d samples, only the last %d still readable",
+                     get_weight_buf().count(), SA_RING);
+          }
           const StateResult *visit = nullptr;
-          if (long_enough) {
+          if (long_enough && complete) {
             visit = &get_analyzer().finalize(
                 get_weight_buf(), id(cat_weights), 5,
                 id(elimination_std_dev_threshold).state);
@@ -1182,10 +1285,46 @@ script:
           }
 
           id(cat_detected).publish_state(false);
-          id(event_start) = 0;
           if (box.kind != BoxEventKind::NONE) {
             id(maintenance_event).trigger(box_event_str(box.kind));
           }
+
+          // Finish the visit's journal entry: the last samples still in RAM,
+          // then the trailer, then the headers. The shipper publishes it
+          // from there, retained, once the broker takes it. Nothing on this
+          // task waits for the network. Without an entry there is no record:
+          // the early samples of anything longer than the ring are gone.
+          BlobEnd blob_end;
+          // event_start is millis() for timing the event; the id is when it
+          // began on the wall clock, which is what the hub dates it by.
+          blob_end.clock_valid = id(homeassistant_time).now().is_valid();
+          blob_end.id = blob_end.clock_valid ? now - duration : 0;
+          blob_end.ended = now;
+          blob_end.duration_s = duration;
+          blob_end.samples = samples;
+          blob_end.long_enough = long_enough;
+          blob_end.continued = continued;
+          blob_end.visit = visit;
+          blob_end.box = &box;
+          blob_end.project = ESPHOME_PROJECT_NAME;
+          blob_end.version = ESPHOME_PROJECT_VERSION;
+          VisitStore &store = get_visit_store();
+          WeightBuffer &buf = get_weight_buf();
+          uint8_t frame_header[8];
+          VisitRecorder::header(frame_header, buf.count());
+          size_t trailer_len = 0;
+          bool journaled = store.drain(8 + 2 * buf.count()) &&
+                           (trailer_len = get_visit_recorder().write_trailer(
+                                buf, blob_end, blob_cfg,
+                                [&store](const char *d, size_t n) { return store.append(d, n); })) > 0 &&
+                           store.close(frame_header);
+          if (journaled) {
+            ESP_LOGI("BLOB", "Visit %lld: %d samples, frame %u bytes", (long long) blob_end.id, samples,
+                     (unsigned) (8 + 2 * buf.count() + trailer_len));
+          } else {
+            ESP_LOGW("BLOB", "Visit %lld not recorded: no journal entry", (long long) blob_end.id);
+          }
+          id(event_start) = 0;
       # Closed by the timeout or by settled litter: the scale is still busy.
       - if:
           condition:
@@ -1202,6 +1341,9 @@ script:
       - script.stop: event_timeout
       - lambda: !lambda |-
           id(event_open) = false;
+          // Nothing to record, but the entry must be let go or the next
+          // visit cannot open one.
+          get_visit_store().discard();
           id(suppress_visit) = false;
           id(cat_detected).publish_state(false);
           id(tare_value) = id(hx711_raw_value).state;

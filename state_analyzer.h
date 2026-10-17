@@ -13,10 +13,27 @@ static const int SA_MAX_PERIODS = 256;
 static const int SA_MOTION_HZ = 10;
 static const int SA_MAX_MOTION_WINDOWS = SA_MAX_SAMPLES / SA_MOTION_HZ;
 static const int SA_MAX_CATS = 5;
-static const int SA_MAX_ZONES = 32;
+/** Zones open on OCCUPIED entry/exit and on delta overflow; a fidgety visit needs room. */
+static const int SA_MAX_ZONES = 256;
 static const float SA_URINATION_STD_DEV_THRESHOLD_G = 4.0f;
 static const int16_t SA_SCALE_ABS = 1;    // 1g, identical to previous behavior
 static const int16_t SA_SCALE_DELTA = 10; // 0.1g, used during OCCUPIED/ELIMINATING
+/**
+ * Samples the buffer keeps in RAM. On the device the rest of a long visit
+ * is read back from its journal entry on flash (see WeightBuffer), so this
+ * only has to cover what the journal has not written yet: 4096 samples is
+ * almost 7 minutes against a 2 KB chunk every ~100 s. Off the device
+ * (replay, tests) the whole visit stays in RAM.
+ */
+#ifndef SA_RING_SAMPLES
+#ifdef ESP_PLATFORM
+#define SA_RING_SAMPLES 4096
+#else
+#define SA_RING_SAMPLES SA_MAX_SAMPLES
+#endif
+#endif
+static const int SA_RING = SA_RING_SAMPLES;
+static_assert(SA_RING > 0 && SA_RING <= SA_MAX_SAMPLES, "ring size");
 
 /**
  * Scratch for median-RMS over eliminating windows.
@@ -139,12 +156,26 @@ class Ring {
 //   Absolute zones (SA_SCALE_ABS=1):  int16_t(weight_g)          -- 1g precision
 //   Delta zones (SA_SCALE_DELTA=10):  int16_t((weight_g-base)*10) -- 0.1g precision
 //
-// Delta zones are opened at each OCCUPIED entry; absolute zones at GAP/ENTERING.
+// Delta zones are opened at each OCCUPIED entry; absolute zones at GAP/ENTERING,
+// and whenever a delta zone would overflow (a cat heavier than 3.2 kg leaving
+// mid-zone), so no stored sample is ever more than 0.5 g from what was read.
 // elimination_motion_metric() decodes per zone and applies TS median-RMS metric.
+//
+// The buffer is the record of the visit: the analyzer consumes what push()
+// returns, so the raw samples plus the zone table replay it exactly.
+//
+// Storage is a ring of the last SA_RING samples. Older ones are read from
+// `backing`, the visit's samples as the journal wrote them (memory-mapped
+// flash on the device), which covers the first `durable` samples. A sample
+// that leaves the ring before it is durable is lost, and the visit with it:
+// complete() goes false and the caller must not analyse or ship it.
 class WeightBuffer {
  public:
   void reset() {
     count_ = 0;
+    lost_ = false;
+    backing_ = nullptr;
+    durable_ = 0;
     zone_count_ = 0;
     current_zone_ = -1;
     begin_absolute_zone();
@@ -162,16 +193,90 @@ class WeightBuffer {
       zones_[current_zone_ = zone_count_++] = {count_, baseline_g, SA_SCALE_DELTA};
   }
 
-  void push(float weight_g) {
-    if (count_ >= SA_MAX_SAMPLES || current_zone_ < 0) return;
-    const ZoneEntry &z = zones_[current_zone_];
-    float val = weight_g - z.baseline_g;
-    if (z.scale != SA_SCALE_ABS) val *= z.scale;
-    samples_[count_++] = static_cast<int16_t>(
-        std::max(-32768.0f, std::min(32767.0f, val)));
+  /**
+   * Store a sample and return what it decodes back to — the value the state
+   * machine must consume so the buffer is an exact record of the visit.
+   * Once the buffer is full nothing is stored and the input passes through;
+   * the analyzer stops at MAX_SESSION samples anyway.
+   */
+  float push(float weight_g) {
+    if (count_ >= SA_MAX_SAMPLES || current_zone_ < 0) return weight_g;
+    const ZoneEntry *z = &zones_[current_zone_];
+    float val = encode_(weight_g, *z);
+    if (z->scale != SA_SCALE_ABS && (val > 32767.0f || val < -32768.0f)) {
+      // The zone table can be full, in which case the sample clamps below.
+      begin_absolute_zone();
+      z = &zones_[current_zone_];
+      val = encode_(weight_g, *z);
+    }
+    // Round, don't truncate: a decoded value re-encodes to the same code,
+    // so a replay that pushes decoded grams rebuilds this buffer exactly.
+    int16_t enc = static_cast<int16_t>(lroundf(std::max(-32768.0f, std::min(32767.0f, val))));
+    // The slot about to be reused holds sample count_ - SA_RING.
+    if (count_ >= SA_RING && (backing_ == nullptr || count_ - SA_RING >= durable_)) lost_ = true;
+    ring_[count_ % SA_RING] = enc;
+    count_++;
+    return decode_(enc, *z);
   }
 
+  /**
+   * Rebuild verbatim from a published record (raw codes plus zone table).
+   * `samples` must outlive the buffer when the record is longer than the ring.
+   */
+  void restore(const int16_t *samples, int n, const ZoneEntry *zones, int nz) {
+    count_ = std::min(n, SA_MAX_SAMPLES);
+    lost_ = false;
+    backing_ = samples;
+    durable_ = count_;
+    int first = std::max(0, count_ - SA_RING);
+    for (int i = first; i < count_; i++) ring_[i % SA_RING] = samples[i];
+    zone_count_ = std::min(nz, SA_MAX_ZONES);
+    memcpy(zones_, zones, zone_count_ * sizeof(ZoneEntry));
+    current_zone_ = zone_count_ - 1;
+  }
+
+  /**
+   * Where samples that have left the ring can be read, and how many of them
+   * are there. Null when there is nowhere (no journal, or it gave up).
+   */
+  void set_backing(const int16_t *samples, int durable) {
+    backing_ = samples;
+    durable_ = samples ? durable : 0;
+  }
+
+  /** Every sample can still be read: the visit can be analysed and shipped. */
+  bool complete() const { return !lost_ && (count_ <= SA_RING || backing_ != nullptr); }
+
   int count() const { return count_; }
+  int zone_count() const { return zone_count_; }
+  const ZoneEntry &zone(int i) const { return zones_[i]; }
+  int16_t raw_sample(int idx) const {
+    if (idx >= count_ - SA_RING) return ring_[idx % SA_RING];
+    return backing_ ? backing_[idx] : 0;
+  }
+
+  /**
+   * Frame bytes still held in RAM, for the journal to copy out: the samples
+   * start at frame offset 8 (after "LBV1" and the count). Returns a pointer
+   * to the byte at `off` and how many follow it contiguously, or null when
+   * that sample has left the ring.
+   */
+  const uint8_t *frame_bytes(uint32_t off, uint32_t *avail) const {
+    *avail = 0;
+    if (off < 8 || (off & 1)) return nullptr;
+    int s = static_cast<int>((off - 8) / 2);
+    if (s >= count_ || s < count_ - SA_RING) return nullptr;
+    int pos = s % SA_RING;
+    *avail = 2 * static_cast<uint32_t>(std::min(SA_RING - pos, count_ - s));
+    return reinterpret_cast<const uint8_t *>(&ring_[pos]);
+  }
+
+  /** Grams the analyzer saw for sample `idx`. */
+  float sample_to_grams(int idx) const {
+    const ZoneEntry *z = zone_for_index(idx);
+    if (!z || idx < 0 || idx >= count_) return 0.0f;
+    return decode_(raw_sample(idx), *z);
+  }
 
   /**
    * Motion metric for an ELIMINATING period — matches TS processEvent:
@@ -213,12 +318,16 @@ class WeightBuffer {
     return nullptr;
   }
 
-  float sample_to_grams(int idx) const {
-    const ZoneEntry *z = zone_for_index(idx);
-    if (!z || idx < 0 || idx >= count_) return 0.0f;
-    float enc = static_cast<float>(samples_[idx]);
-    if (z->scale == SA_SCALE_ABS) return enc;
-    return z->baseline_g + enc / static_cast<float>(z->scale);
+  static float encode_(float weight_g, const ZoneEntry &z) {
+    float val = weight_g - z.baseline_g;
+    if (z.scale != SA_SCALE_ABS) val *= z.scale;
+    return val;
+  }
+
+  static float decode_(int16_t enc, const ZoneEntry &z) {
+    float val = static_cast<float>(enc);
+    if (z.scale == SA_SCALE_ABS) return val;
+    return z.baseline_g + val / static_cast<float>(z.scale);
   }
 
   /** TS rmsAroundMean over decoded grams in [s, s+n) without a heap decode buffer. */
@@ -235,8 +344,11 @@ class WeightBuffer {
     return sqrtf(sq / static_cast<float>(n));
   }
 
-  int16_t samples_[SA_MAX_SAMPLES];
+  int16_t ring_[SA_RING];
   int count_ = 0;
+  bool lost_ = false;
+  const int16_t *backing_ = nullptr;
+  int durable_ = 0;
   ZoneEntry zones_[SA_MAX_ZONES];
   int zone_count_ = 0;
   int current_zone_ = -1;
@@ -388,6 +500,12 @@ class StateAnalyzer {
     if (elim_count_ > best_elim_dur_ && elim_count_ > 0)
       best_w = elim_sum_ / static_cast<float>(elim_count_);
     result_.cat_weight = (best_w > 0.0f) ? best_w : cat_weight_;
+    // The event usually closes a few seconds after the cat leaves, well
+    // before REENTRY_WIN, so the GAP branch never gets to set the waste.
+    // What the scale settled on over the last second of that gap is the
+    // same thing end_event tares away, so take it from there.
+    if (state_ == AnalyzerState::GAP && current_sample_ - state_start_ >= WINDOW)
+      waste_weight_ = window_.mean();
     result_.waste_weight = waste_weight_;
     result_.period_count = 0;
     result_.elimination_type = EliminationType::UNKNOWN;
@@ -410,6 +528,7 @@ class StateAnalyzer {
 
   void reset() {
     state_ = AnalyzerState::EMPTY;
+    state_start_ = 0;
     session_active_ = false;
     window_.reset(WINDOW);
     weight_hist_.reset(WINDOW);
@@ -459,6 +578,7 @@ class StateAnalyzer {
   bool session_active_ = false;
   int session_start_ = 0;
   int current_sample_ = 0;
+  int state_start_ = 0;  // sample on which state_ was entered (not backdated)
   float waste_weight_ = 0.0f;
   float cat_weight_ = 0.0f;
   float elim_sum_ = 0.0f;
@@ -518,6 +638,7 @@ class StateAnalyzer {
       }
     }
     state_ = ns;
+    state_start_ = current_sample_;
   }
 
   /** among cats within tolerance, smallest absolute diff wins. */
@@ -592,8 +713,10 @@ class StateAnalyzer {
       }
     }
 
-    // Downgrade short ELIMINATING periods
-    const int min_elim = 5 * HZ;
+    // Downgrade short ELIMINATING periods. 8 s matches cat-health's
+    // StateAnalyzer (re-tuned 2026-08-19 on 1818 visits); at 5 s a cat
+    // holding still for a few seconds while exploring read as an elimination.
+    const int min_elim = 8 * HZ;
     for (int i = 0; i < n; i++) {
       if (tmp[i].state == AnalyzerState::ELIMINATING &&
           (tmp[i].end - tmp[i].start) < min_elim)
@@ -693,6 +816,7 @@ struct BoxEvent {
 class BoxMonitor {
  public:
   void configure(const BoxConfig &c) { cfg_ = c; }
+  const BoxConfig &config() const { return cfg_; }
 
   /** `base_g`: absolute level the event is measured against (the last tare). */
   void begin_event(float base_g) {
