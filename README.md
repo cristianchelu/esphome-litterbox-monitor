@@ -51,10 +51,10 @@ buttons, and actions.
 
 ### ESP32
 
-- Use a variant with a **hardware FPU**: the ESP32-S3 (what the config
-  targets — the development build runs on an ESP32-S3 Super Mini) or the
-  classic ESP32. For a classic ESP32 set `board: esp32dev`, drop
-  `flash_size`, and pick pins that exist on it.
+- Use a variant with a **hardware FPU**: the classic ESP32 (what the config
+  targets) or the ESP32-S3. For an S3 set `board: esp32-s3-devkitc-1` and
+  pick HX711 pins that exist on it (the development build runs on an
+  ESP32-S3 Super Mini with `GPIO13`/`GPIO12`).
 - PoopSense leans on float math — per-sample filtering at 10 Hz and
   standard-deviation crunching at 0.1 g precision after every visit — so
   variants that emulate floats in software (S2, C3, C6) are untested.
@@ -83,10 +83,10 @@ for wiring the load cells to the HX711 and mounting them under the baseboard.
 
 Wire the HX711 to the ESP32. The configuration defaults to:
 
-| HX711 pin | ESP32-S3 pin |
+| HX711 pin | ESP32 pin |
 |---|---|
-| `DOUT` / `DT` | `GPIO13` |
-| `SCK` / `CLK` | `GPIO12` |
+| `DOUT` / `DT` | `GPIO16` |
+| `SCK` / `CLK` | `GPIO4` |
 
 You can use different pins — just update the `hx711` sensor section of the
 YAML to match your wiring.

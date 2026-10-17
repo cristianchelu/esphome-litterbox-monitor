@@ -187,7 +187,7 @@ esphome:
     - visit_store.h
   project:
     name: "CristianChelu.LitterboxMonitor"
-    version: "esp32s3.hx711"
+    version: "esp32.hx711"
   on_boot:
     priority: -100
     then:
@@ -203,16 +203,13 @@ esphome:
             return id(mqtt_client).publish("${mqtt_topic}/visit/last", data, len, 0, true);
           });
 
-# ESP32-S3 Super Mini (HW-747, ESP32-S3FH4R2): 4 MB flash, 2 MB quad PSRAM
-# left disabled — only the last few minutes of a visit are kept in RAM, the
-# rest is read back from the journal. The same holds on an original ESP32.
+# Classic ESP32 with 4 MB flash. Only the last few minutes of a visit are
+# kept in RAM; the rest is read back from the journal, so no PSRAM is needed.
+# An ESP32-S3 works too: set `board: esp32-s3-devkitc-1` and move the HX711
+# pins below to ones the S3 has (the Super Mini build uses GPIO13/GPIO12).
 esp32:
-  board: esp32-s3-devkitc-1
+  board: esp32dev
   flash_size: 4MB
-  # Nothing here needs the S3's full speed: a sample costs 10 us at 160 MHz
-  # against a 100 ms period, and the verdict for an hour-long visit 37 ms,
-  # once. Runs cooler now and leaves room for a battery later.
-  cpu_frequency: 160MHz
   framework:
     type: esp-idf
   # Visit journal (see visit_store.h): ~100 typical visits or 7 hour-long
@@ -529,8 +526,8 @@ sensor:
   - platform: hx711
     id: hx711_analog_value
     name: "Analog sensor value"
-    dout_pin: GPIO13
-    clk_pin: GPIO12
+    dout_pin: GPIO16
+    clk_pin: GPIO4
     gain: 128
     update_interval: 100ms
     entity_category: diagnostic
