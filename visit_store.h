@@ -22,8 +22,11 @@
 // link needs. The two share the pending table under a mutex.
 //
 // Layout: entries start on sector boundaries, header then frame bytes.
-//   u32 magic "LBJ1"  u32 seq  u32 len  u32 crc  u32 state  u32 pad[3]
+//   u32 magic "LBJ1"  u32 seq  u32 len  u32 crc  u32 state  u32 kind  u32 pad[2]
 //   state: FFFFFFFF writing -> 0000FFFF complete -> 00000000 delivered.
+//   kind: what the entry holds; FFFFFFFF is a visit frame, so entries
+//   written before the word existed read as visits. Other kinds (a
+//   maintenance record, say) clear bits of it. Not covered by the crc.
 //   len and crc (over magic, seq, len) are all-ones until close; the boot
 //   scan only trusts an entry whose crc matches.
 // Circular: an entry reserves up to MAX_ENTRY sectors ahead and evicts
@@ -54,6 +57,7 @@ class VisitStore {
   static const uint32_t HEADER = 32;
 
   enum : uint32_t { WRITING = 0xFFFFFFFFu, COMPLETE = 0x0000FFFFu, DELIVERED = 0u };
+  enum : uint32_t { KIND_VISIT = 0xFFFFFFFFu };
 
   struct Header {
     uint32_t magic;
@@ -61,7 +65,8 @@ class VisitStore {
     uint32_t len;
     uint32_t crc;
     uint32_t state;
-    uint32_t pad[3];
+    uint32_t kind;
+    uint32_t pad[2];
   };
   static_assert(sizeof(Header) == HEADER, "header layout");
 
@@ -123,7 +128,7 @@ class VisitStore {
     wr_ = Write{std::move(src), head_, seq_next_++, 0, 0, true};
     prepare_sector_(head_);
     wr_.prepared = 1;
-    Header h{MAGIC, wr_.seq, 0xFFFFFFFFu, 0xFFFFFFFFu, WRITING, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}};
+    Header h{MAGIC, wr_.seq, 0xFFFFFFFFu, 0xFFFFFFFFu, WRITING, KIND_VISIT, {0xFFFFFFFFu, 0xFFFFFFFFu}};
     set_blank_(head_, false);
     if (esp_partition_write(part_, head_ * SECTOR, &h, sizeof(h)) != ESP_OK) {
       abandon_("header write failed");
@@ -182,7 +187,7 @@ class VisitStore {
     uint32_t frame_len = wr_.written;
     uint32_t base = wr_.sector * SECTOR;
     esp_err_t err = esp_partition_write(part_, base + HEADER, frame_header, 8);
-    Header h{MAGIC, wr_.seq, frame_len, 0, COMPLETE, {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu}};
+    Header h{MAGIC, wr_.seq, frame_len, 0, COMPLETE, KIND_VISIT, {0xFFFFFFFFu, 0xFFFFFFFFu}};
     h.crc = crc_(h);
     if (err == ESP_OK) err = esp_partition_write(part_, base + offsetof(Header, len), &h.len, 12);
     if (err != ESP_OK) {
